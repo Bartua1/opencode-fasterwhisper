@@ -226,7 +226,7 @@ def record_audio(
     # Configurable energy threshold via env
     env_thresh = os.environ.get("WHISPER_ENERGY_THRESHOLD")
     custom_threshold = float(env_thresh) if env_thresh else None
-    threshold = custom_threshold if custom_threshold is not None else 0.008
+    threshold = custom_threshold if custom_threshold is not None else 0.003
 
     with sd.InputStream(device=device_id, samplerate=actual_samplerate, channels=1, dtype="float32", blocksize=block_size, callback=callback):
         while not stop_event.is_set():
@@ -254,21 +254,22 @@ def record_audio(
                         continue
                     elif len(ambient_samples) > 0:
                         # Cap ambient noise estimation so speech during initial ms doesn't spike threshold
-                        ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.002
-                        ambient = min(ambient, 0.015)
-                        threshold = max(ambient * 1.8, 0.006)
-                        print(f"[OpenCode Whisper] Calibración audio: ruido={ambient:.4f}, umbral={threshold:.4f}")
+                        ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.001
+                        ambient = min(ambient, 0.01)
+                        # Lower threshold floor to 0.0015 for quiet microphones
+                        threshold = max(ambient * 1.4, 0.0015)
+                        print(f"[OpenCode Whisper] Calibración audio: ruido={ambient:.5f}, umbral={threshold:.5f}")
                         ambient_samples = []
 
                 # Periodic progress logging in log file every 1.5s
                 if now - last_progress_log >= 1.5:
                     last_progress_log = now
-                    print(f"[OpenCode Whisper] Grabando... elapsed={elapsed:.1f}s | chunks={len(recorded_chunks)} | nivel_actual={energy:.4f} | umbral={threshold:.4f} | voz_detectada={speech_started}")
+                    print(f"[OpenCode Whisper] Grabando... elapsed={elapsed:.1f}s | chunks={len(recorded_chunks)} | nivel_actual={energy:.5f} | umbral={threshold:.5f} | voz_detectada={speech_started}")
 
                 if energy > threshold:
                     if not speech_started:
                         speech_started = True
-                        print(f"🗣️  [OpenCode Whisper] Voz detectada (nivel: {energy:.4f} > {threshold:.4f})")
+                        print(f"🗣️  [OpenCode Whisper] Voz detectada (nivel: {energy:.5f} > {threshold:.5f})")
                     silence_start_time = None
                 elif speech_started:
                     if silence_start_time is None:
@@ -297,6 +298,31 @@ def record_audio(
 
     audio_float = np.concatenate(recorded_chunks, axis=0).flatten()
     
+    # Calculate raw volume statistics
+    raw_max_amp = float(np.max(np.abs(audio_float))) if len(audio_float) > 0 else 0.0
+    raw_avg_rms = float(np.sqrt(np.mean(audio_float ** 2))) if len(audio_float) > 0 else 0.0
+
+    # Auto Gain Control (AGC) & Normalization
+    gain_env = os.environ.get("WHISPER_AUDIO_GAIN", "auto")
+    applied_gain = 1.0
+
+    if gain_env.lower() != "off" and raw_max_amp > 1e-5:
+        if gain_env.lower() == "auto":
+            # If volume is low (peak < 0.25), scale up towards 0.80 peak (up to 50x safely)
+            if raw_max_amp < 0.25:
+                applied_gain = min(0.80 / raw_max_amp, 50.0)
+                db_gain = 20 * np.log10(applied_gain) if applied_gain > 0 else 0
+                print(f"[OpenCode Whisper] 🔊 Audio bajo detectado (pico: {raw_max_amp:.4f}). Auto-amplificando x{applied_gain:.1f} (+{db_gain:.1f} dB)...")
+        else:
+            try:
+                applied_gain = float(gain_env)
+                print(f"[OpenCode Whisper] 🔊 Aplicando ganancia manual x{applied_gain:.1f} (WHISPER_AUDIO_GAIN)...")
+            except ValueError:
+                applied_gain = 1.0
+
+    if applied_gain != 1.0:
+        audio_float = np.clip(audio_float * applied_gain, -1.0, 1.0)
+
     # Scale float32 to 16-bit PCM for WAV
     audio_int16 = np.clip(audio_float * 32767, -32768, 32767).astype(np.int16)
 
@@ -308,10 +334,10 @@ def record_audio(
         wf.writeframes(audio_int16.tobytes())
 
     duration_sec = len(audio_float) / actual_samplerate
-    max_amp = float(np.max(np.abs(audio_float))) if len(audio_float) > 0 else 0.0
-    avg_rms = float(np.sqrt(np.mean(audio_float ** 2))) if len(audio_float) > 0 else 0.0
+    final_max_amp = float(np.max(np.abs(audio_float))) if len(audio_float) > 0 else 0.0
+    final_avg_rms = float(np.sqrt(np.mean(audio_float ** 2))) if len(audio_float) > 0 else 0.0
 
-    print(f"[OpenCode Whisper] Audio guardado: {duration_sec:.2f}s | RMS medio: {avg_rms:.4f} | Pico max: {max_amp:.4f}")
+    print(f"[OpenCode Whisper] Audio guardado: {duration_sec:.2f}s | RMS: {final_avg_rms:.4f} (original: {raw_avg_rms:.4f}) | Pico: {final_max_amp:.4f} (original: {raw_max_amp:.4f})")
     print(f"[OpenCode Whisper] Archivo temporal: {temp_wav_path}")
 
     # Guardar copia fija en ~/.config/opencode/last_recording.wav para inspección manual
