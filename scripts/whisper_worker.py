@@ -101,7 +101,17 @@ def play_sound(sound_name: str):
     elif sys.platform == "win32":
         try:
             import winsound
-            winsound.MessageBeep()
+            if sound_name == "Tink":
+                # Start listening tone (medium-high beep)
+                winsound.Beep(1200, 150)
+            elif sound_name == "Pop":
+                # Stopped tone
+                winsound.Beep(800, 150)
+            elif sound_name == "Glass":
+                # Success/completion tone
+                winsound.Beep(1500, 200)
+            else:
+                winsound.MessageBeep()
         except:
             pass
 

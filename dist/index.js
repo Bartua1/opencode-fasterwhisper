@@ -12673,6 +12673,7 @@ var SuperWhisperPlugin = async ({
     if (workerScript) {
       try {
         const { spawn } = await import("child_process");
+        const { openSync } = await import("fs");
         const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
         const workerArgs = [
           workerScript,
@@ -12687,8 +12688,16 @@ var SuperWhisperPlugin = async ({
         if (lang) {
           workerArgs.push("--language", lang);
         }
+        const logFilePath = join3(homedir2(), ".config", "opencode", "whisper.log");
+        let outFd = "ignore";
+        try {
+          outFd = openSync(logFilePath, "a");
+        } catch {
+          outFd = "ignore";
+        }
+        log("info", `Triggering local faster-whisper worker: ${workerScript} (log: ${logFilePath})`);
         const workerProc = spawn(pythonBin, workerArgs, {
-          stdio: "ignore",
+          stdio: ["ignore", outFd, outFd],
           detached: true
         });
         workerProc.unref();
