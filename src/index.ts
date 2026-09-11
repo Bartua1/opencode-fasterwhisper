@@ -710,10 +710,63 @@ export const SuperWhisperPlugin: Plugin = async ({
     await replyToPermission(permissionId, replyValue)
   }
 
+  async function handleSessionCreated(event: any) {
+    const props = event.properties || {}
+    const sessionId = props.info?.id || props.sessionID
+    if (!sessionId) return
+
+    if (isSessionDisabled(sessionId) || isSubagent(sessionId)) return
+
+    const listenOnStart =
+      process.env.WHISPER_LISTEN_ON_START === "1" ||
+      process.env.WHISPER_LISTEN_ON_START === "true"
+
+    if (!listenOnStart) return
+
+    log("info", `Session created, listening for initial voice prompt (session=${sessionId})`)
+
+    const response = await sendNotification({
+      sessionId,
+      status: "listening",
+      summary: "OpenCode ready. Speak your opening prompt...",
+      messageContent: "New session started. Please speak your prompt.",
+    })
+
+    if (response && response !== CANCELLED) {
+      await sendResponseToOpenCode(sessionId, response)
+    }
+  }
+
   // --- Event router ---
 
   return {
+    config: async (config: any) => {
+      config.command = config.command || {}
+      config.command["whisper"] = {
+        description: "Dictate prompt via local Faster-Whisper",
+        template: "Please listen to my microphone via whisper_dictate and execute my request.",
+      }
+    },
     tool: {
+      whisper_dictate: tool({
+        description:
+          "Listen to the user's microphone and transcribe their spoken instruction using local Faster-Whisper.",
+        args: {
+          prompt: tool.schema.string().optional(),
+        },
+        execute: async (args, context: any) => {
+          const sessionId = context.sessionID
+          const response = await sendNotification({
+            sessionId,
+            status: "dictate",
+            summary: args.prompt || "Listening to microphone...",
+            messageContent: "Manual dictation requested",
+          })
+          return response && response !== CANCELLED
+            ? `Transcribed user voice: "${response}"`
+            : "No speech detected."
+        },
+      }),
       superwhisper_toggle: tool({
         description:
           "Enable or disable Superwhisper voice notifications for this session. Use action='disable' when the user wants to turn Superwhisper off, and action='enable' when they want to turn it back on.",
@@ -745,6 +798,12 @@ export const SuperWhisperPlugin: Plugin = async ({
       )
 
       switch (e.type as string) {
+        case "session.created":
+          handleSessionCreated(e).catch((err: any) =>
+            log("error", `handleSessionCreated failed: ${err}`),
+          )
+          break
+
         case "session.idle":
           handleCompleted(e).catch((err: any) =>
             log("error", `handleCompleted failed: ${err}`),
