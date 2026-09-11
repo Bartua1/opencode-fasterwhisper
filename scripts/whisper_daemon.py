@@ -32,10 +32,24 @@ if sys.platform == "win32":
         pass
 
 
+LOG_FILE = Path.home() / ".config" / "opencode" / "whisper.log"
+try:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+
+
 def log(msg: str):
-    """Print log message prefixed for OpenCode."""
-    sys.stderr.write(f"[OpenCode Whisper Daemon] {msg}\n")
+    """Print log message to stderr and append to whisper.log."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] [OpenCode Whisper Daemon] {msg}\n"
+    sys.stderr.write(formatted)
     sys.stderr.flush()
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(formatted)
+    except Exception:
+        pass
 
 
 def send_json(data: dict):
@@ -243,18 +257,22 @@ class WhisperDaemon:
 
             recorded_chunks = []
             start_time = time.time()
+            last_progress_log = start_time
             speech_started = False
             silence_start_time = None
             silence_timeout = 1.2
             max_wait_speech = 10.0
-            threshold = 0.003
+            max_recording_time = 30.0
+            ambient_samples = []
 
+            custom_threshold = None
             env_thresh = os.environ.get("WHISPER_ENERGY_THRESHOLD")
             if env_thresh:
                 try:
-                    threshold = float(env_thresh)
+                    custom_threshold = float(env_thresh)
                 except ValueError:
                     pass
+            threshold = custom_threshold if custom_threshold is not None else 0.003
 
             # Open stream
             with sd.InputStream(device=device_id, samplerate=sample_rate, channels=1, dtype="float32", blocksize=1024, callback=audio_callback):
@@ -262,8 +280,14 @@ class WhisperDaemon:
                     now = time.time()
                     elapsed = now - start_time
 
+                    # Safety hard timeout: never record longer than 30s
+                    if elapsed >= max_recording_time:
+                        log(f"Límite máximo de grabación alcanzado ({max_recording_time:.0f}s). Finalizando.")
+                        break
+
+                    # Timeout if user never spoke within 10s
                     if elapsed >= max_wait_speech and not speech_started:
-                        log("Timeout reached without detecting speech.")
+                        log("Tiempo límite de espera alcanzado sin detectar voz (10s).")
                         break
 
                     try:
@@ -272,16 +296,34 @@ class WhisperDaemon:
 
                         energy = float(np.sqrt(np.mean(chunk ** 2)))
 
+                        # Dynamic ambient noise calibration during first 0.25s
+                        if custom_threshold is None:
+                            if elapsed < 0.25:
+                                ambient_samples.append(energy)
+                                continue
+                            elif len(ambient_samples) > 0:
+                                ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.001
+                                ambient = min(ambient, 0.02)
+                                threshold = max(ambient * 1.5, 0.0025)
+                                log(f"Calibración de audio: ruido_base={ambient:.5f}, umbral_voz={threshold:.5f}")
+                                ambient_samples = []
+
+                        # Periodic progress logging every 1.5s
+                        if now - last_progress_log >= 1.5:
+                            last_progress_log = now
+                            silence_dur = (now - silence_start_time) if silence_start_time else 0.0
+                            log(f"Grabando... elapsed={elapsed:.1f}s | nivel={energy:.5f} | umbral={threshold:.5f} | voz_detectada={speech_started} | silencio={silence_dur:.1f}s")
+
                         if energy > threshold:
                             if not speech_started:
                                 speech_started = True
-                                log(f"Speech detected (energy={energy:.5f} > {threshold:.5f})")
+                                log(f"Voz detectada! (nivel: {energy:.5f} > umbral: {threshold:.5f})")
                             silence_start_time = None
                         elif speech_started:
                             if silence_start_time is None:
                                 silence_start_time = now
                             elif now - silence_start_time >= silence_timeout:
-                                log(f"Silence detected ({silence_timeout}s). Ending recording.")
+                                log(f"Silencio detectado ({silence_timeout}s). Finalizando grabación...")
                                 break
 
                     except queue.Empty:
@@ -300,13 +342,13 @@ class WhisperDaemon:
                 send_json({"status": "no_speech"})
                 return
 
-            # Wait for model if still preloading
+            # Wait for model if still preloading (up to 60s in case downloading)
             if not self.model_ready.is_set():
-                log("Waiting for WhisperModel to finish preloading...")
-                self.model_ready.wait(timeout=15.0)
+                log("Waiting for WhisperModel to finish preloading (may be downloading model files)...")
+                self.model_ready.wait(timeout=60.0)
 
             if not self.model:
-                log("WhisperModel unavailable.")
+                log("ERROR: WhisperModel unavailable.")
                 self._write_response(response_file, "$$NO_SPEECH$$")
                 send_json({"status": "error", "error": "WhisperModel failed to load"})
                 return
@@ -327,6 +369,20 @@ class WhisperDaemon:
 
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
                 temp_wav_path = tf.name
+
+            # Save debug copy
+            try:
+                import shutil
+                debug_wav = Path.home() / ".config" / "opencode" / "last_recording.wav"
+                debug_wav.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(debug_wav), "wb") as dwf:
+                    dwf.setnchannels(1)
+                    dwf.setsampwidth(2)
+                    dwf.setframerate(sample_rate)
+                    dwf.writeframes(audio_int16.tobytes())
+                log(f"Copia de audio guardada en: {debug_wav}")
+            except Exception as e:
+                log(f"No se pudo guardar last_recording.wav: {e}")
 
             try:
                 with wave.open(temp_wav_path, "wb") as wf:
