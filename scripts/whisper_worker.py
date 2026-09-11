@@ -211,67 +211,57 @@ def record_audio(
             now = time.time()
             elapsed = now - start_time
 
-            # Fixed duration limit
             if duration and elapsed >= duration:
                 break
 
-            # Timeout only after max_wait_speech (e.g. 10s)
-            if not speech_started and elapsed >= max_wait_speech:
-                timeout_msg = "⏱️ [OpenCode Whisper] No se detectó voz dentro del tiempo límite." if is_es else "⏱️ [OpenCode Whisper] No speech detected within timeout."
-                print(timeout_msg)
+            # Timeout after 12s if user stopped or never spoke
+            if elapsed >= max_wait_speech and not speech_started:
+                print("⏱️ [OpenCode Whisper] Tiempo límite alcanzado. Procesando audio grabado...")
                 break
 
             try:
                 chunk = q.get(timeout=0.15)
                 recorded_chunks.append(chunk)
 
-                # Calculate RMS energy of chunk (float32 values are between -1.0 and 1.0)
+                # Calculate normalized RMS
                 energy = float(np.sqrt(np.mean(chunk ** 2)))
 
-                # Dynamic ambient baseline
-                if elapsed < 0.4:
+                if elapsed < 0.3:
                     ambient_samples.append(energy)
                     continue
                 elif len(ambient_samples) > 0:
-                    ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.005
-                    # Speech threshold is at least ambient * 2.5 or a minimum sensible floor
-                    threshold = max(ambient * 2.5, 0.012)
+                    ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.002
+                    # Dynamic threshold: easily triggered by speech
+                    threshold = max(ambient * 2.0, 0.008)
+                    print(f"[OpenCode Whisper] Calibración audio: ruido={ambient:.4f}, umbral={threshold:.4f}")
                     ambient_samples = []
 
-                # Speech / silence state machine
                 if energy > threshold:
                     if not speech_started:
                         speech_started = True
-                        detect_msg = "🗣️  [OpenCode Whisper] Voz detectada..." if is_es else "🗣️  [OpenCode Whisper] Speech detected..."
-                        print(detect_msg)
+                        print(f"🗣️  [OpenCode Whisper] Voz detectada (nivel: {energy:.4f} > {threshold:.4f})")
                     silence_start_time = None
                 elif speech_started:
                     if silence_start_time is None:
                         silence_start_time = now
                     elif now - silence_start_time >= silence_timeout:
-                        silence_msg = "🤫 [OpenCode Whisper] Silencio detectado. Transcribiendo..." if is_es else "🤫 [OpenCode Whisper] Silence detected. Stopping recording..."
-                        print(silence_msg)
+                        print("🤫 [OpenCode Whisper] Silencio detectado. Finalizando grabación...")
                         break
 
             except queue.Empty:
                 pass
 
     play_sound("Pop")
-    stop_msg = "🛑 [OpenCode Whisper] Grabación finalizada. Transcribiendo..." if is_es else "🛑 [OpenCode Whisper] Recording stopped. Transcribing..."
-    print(stop_msg)
-    transcribing_notify = "Transcribiendo tu voz..." if is_es else "Transcribing your audio..."
-    notify("📝 OpenCode Whisper", transcribing_notify, sound="Pop")
+    print("🛑 [OpenCode Whisper] Grabación finalizada. Transcribiendo...")
+    notify("📝 OpenCode Whisper", "Transcribiendo tu voz...", sound="Pop")
 
     if not recorded_chunks:
-        no_speech_msg = "[OpenCode Whisper] No se capturó audio." if is_es else "[OpenCode Whisper] No audio captured."
-        print(no_speech_msg)
+        print("[OpenCode Whisper] No se capturó ningún fragmento de audio del micrófono.")
         return ""
 
-    # Even if speech_started wasn't triggered by RMS, if the user pressed Enter or recorded chunks exist,
-    # let faster-whisper's built-in Silero VAD do the authoritative voice detection!
     audio_float = np.concatenate(recorded_chunks, axis=0).flatten()
     
-    # Scale float32 (-1.0 to 1.0) to 16-bit PCM for WAV compatibility
+    # Scale float32 to 16-bit PCM for WAV
     audio_int16 = np.clip(audio_float * 32767, -32768, 32767).astype(np.int16)
 
     # Write WAV file
@@ -281,6 +271,7 @@ def record_audio(
         wf.setframerate(sample_rate)
         wf.writeframes(audio_int16.tobytes())
 
+    print(f"[OpenCode Whisper] Audio guardado para transcripción: {len(audio_float)/sample_rate:.2f}s ({temp_wav_path})")
     return temp_wav_path
 
 def transcribe_audio(
