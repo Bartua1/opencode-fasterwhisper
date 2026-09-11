@@ -25,3 +25,9 @@ logs
 
 # OS
 .DS_Store
+
+# Python & Models
+__pycache__/
+*.pyc
+models/
+

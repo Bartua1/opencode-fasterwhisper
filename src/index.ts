@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs"
 import { join } from "path"
+import { homedir } from "os"
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
 import { LOG_PREFIX, MESSAGE_DIR, POLL_TIMEOUT_MS, POLL_INTERVAL_MS } from "./types.js"
@@ -27,6 +28,22 @@ export {
 export type { DeeplinkParams }
 
 const CANCELLED = "$$CANCELLED$$"
+
+function findWorkerScript(cwd?: string): string | undefined {
+  if (process.env.WHISPER_WORKER_PATH && existsSync(process.env.WHISPER_WORKER_PATH)) {
+    return process.env.WHISPER_WORKER_PATH
+  }
+  const candidates = [
+    join(process.cwd(), "scripts", "whisper_worker.py"),
+    cwd ? join(cwd, "scripts", "whisper_worker.py") : "",
+    join(homedir(), ".config", "opencode", "scripts", "whisper_worker.py"),
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
 
 async function detectScheme($: any): Promise<string> {
   const envScheme = process.env.SUPERWHISPER_SCHEME
@@ -236,8 +253,9 @@ export const SuperWhisperPlugin: Plugin = async ({
       log("info", `Using cached session title for ${sessionId}: "${title}"`)
     }
 
+    let superwhisperDelivered = false
     try {
-      await deliverAgentPayload(
+      superwhisperDelivered = await deliverAgentPayload(
         {
           kind: "update",
           agent: "opencode",
@@ -257,10 +275,42 @@ export const SuperWhisperPlugin: Plugin = async ({
       )
     } catch (err) {
       log(
-        "error",
-        `Failed to deliver Superwhisper payload. Is Superwhisper installed? — ${err}`,
+        "info",
+        `Superwhisper desktop app not reachable: ${err}`,
       )
-      return null
+    }
+
+    // Launch local faster-whisper worker if available
+    const workerScript = findWorkerScript(directory)
+    if (workerScript) {
+      try {
+        const { spawn } = await import("child_process")
+        const pythonBin =
+          process.env.PYTHON_BIN ||
+          (process.platform === "win32" ? "python" : "python3")
+        log("info", `Triggering local faster-whisper worker: ${workerScript}`)
+        const workerProc = spawn(
+          pythonBin,
+          [
+            workerScript,
+            "--response-file",
+            responseFile,
+            "--message-file",
+            messageFile,
+            "--summary",
+            summary,
+          ],
+          {
+            stdio: "ignore",
+            detached: true,
+          },
+        )
+        workerProc.unref()
+      } catch (err) {
+        log("warn", `Could not launch local whisper worker: ${err}`)
+      }
+    } else if (!superwhisperDelivered) {
+      log("warn", "Neither Superwhisper app nor local whisper_worker.py was triggered.")
     }
 
     log("info", `Notification sent: status=${status} session=${sessionId}`)
