@@ -543,6 +543,21 @@ export const SuperWhisperPlugin: Plugin = async ({
       return
     }
 
+    // Only listen on assistant completion if explicitly enabled (default is on-demand via /whisper)
+    const autoListen =
+      process.env.WHISPER_AUTO_LISTEN === "1" ||
+      process.env.WHISPER_AUTO_LISTEN === "true" ||
+      process.env.WHISPER_LISTEN_ON_IDLE === "1" ||
+      process.env.WHISPER_LISTEN_ON_IDLE === "true"
+
+    if (!autoListen) {
+      log(
+        "debug",
+        `Skipping auto-listen on completion for session=${sessionId} (WHISPER_AUTO_LISTEN is disabled; use /whisper to dictate)`,
+      )
+      return
+    }
+
     const summary = extractSummary(fullMessage)
 
     const response = await sendNotification({
@@ -621,6 +636,16 @@ export const SuperWhisperPlugin: Plugin = async ({
     const questions = props.questions || []
     if (!questions.length) return
 
+    if (
+      process.env.WHISPER_ONLY_ON_DEMAND === "1" ||
+      process.env.WHISPER_ONLY_ON_DEMAND === "true" ||
+      process.env.WHISPER_MANUAL_ONLY === "1" ||
+      process.env.WHISPER_MANUAL_ONLY === "true"
+    ) {
+      log("debug", `Skipping question voice elicitation (WHISPER_ONLY_ON_DEMAND is active)`)
+      return
+    }
+
     questionActiveForSession.add(sessionId)
 
     let context: string | undefined
@@ -677,6 +702,16 @@ export const SuperWhisperPlugin: Plugin = async ({
 
     if (isSubagent(sessionId)) {
       log("debug", `Skipping permission for session=${sessionId} (subagent)`)
+      return
+    }
+
+    if (
+      process.env.WHISPER_ONLY_ON_DEMAND === "1" ||
+      process.env.WHISPER_ONLY_ON_DEMAND === "true" ||
+      process.env.WHISPER_MANUAL_ONLY === "1" ||
+      process.env.WHISPER_MANUAL_ONLY === "true"
+    ) {
+      log("debug", `Skipping permission voice elicitation (WHISPER_ONLY_ON_DEMAND is active)`)
       return
     }
 
