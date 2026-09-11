@@ -292,6 +292,10 @@ export const SuperWhisperPlugin: Plugin = async ({
         if (lang) {
           workerArgs.push("--language", lang)
         }
+        const inputDev = process.env.WHISPER_INPUT_DEVICE
+        if (inputDev) {
+          workerArgs.push("--input-device", inputDev)
+        }
 
         const logFilePath = join(homedir(), ".config", "opencode", "whisper.log")
         let outFd: number | "ignore" = "ignore"

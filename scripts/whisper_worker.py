@@ -120,7 +120,8 @@ def record_audio(
     silence_timeout: float = 1.0,
     max_wait_speech: float = 10.0,
     sample_rate: int = 16000,
-    language: str = "es"
+    language: str = "es",
+    input_device: str = None
 ) -> str:
     """
     Record audio from default microphone using smart silence detection.
@@ -140,6 +141,20 @@ def record_audio(
         print("Please install requirements: pip install sounddevice numpy scipy")
         sys.exit(1)
 
+    # Determine input device
+    device_id = None
+    if input_device:
+        try:
+            device_id = int(input_device)
+        except ValueError:
+            device_id = input_device
+
+    try:
+        input_info = sd.query_devices(device=device_id, kind='input')
+        mic_name = input_info.get('name', 'Default')
+    except Exception as e:
+        mic_name = f"Default (query error: {e})"
+
     q = queue.Queue()
     stop_event = threading.Event()
 
@@ -152,6 +167,7 @@ def record_audio(
     prompt_msg = "🎙️  [OpenCode Whisper] Escuchando... Di tu instrucción ahora." if is_es else "🎙️  [OpenCode Whisper] Listening... Speak your prompt now."
     print("\n" + "="*50)
     print(prompt_msg)
+    print(f"🎤 [OpenCode Whisper] Micrófono en uso: {mic_name}")
     print("="*50)
 
     # Audio cue & desktop notification
@@ -184,7 +200,7 @@ def record_audio(
     chunk_duration = 0.1  # 100ms
     block_size = int(sample_rate * chunk_duration)
 
-    with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16", blocksize=block_size, callback=callback):
+    with sd.InputStream(device=device_id, samplerate=sample_rate, channels=1, dtype="int16", blocksize=block_size, callback=callback):
         while not stop_event.is_set():
             now = time.time()
             elapsed = now - start_time
@@ -295,6 +311,8 @@ def transcribe_audio(
 
 def main():
     parser = argparse.ArgumentParser(description="Local Faster-Whisper worker for OpenCode")
+    parser.add_argument("--list-devices", action="store_true", help="List available audio input devices and exit")
+    parser.add_argument("--input-device", type=str, default=os.environ.get("WHISPER_INPUT_DEVICE", None), help="Microphone device name or index (default: system default)")
     parser.add_argument("--model", type=str, default=os.environ.get("WHISPER_MODEL", "base"), help="Model size or name (default: base)")
     parser.add_argument("--model-path", type=str, default=None, help="Explicit path to offline model directory")
     parser.add_argument("--audio-file", type=str, default=None, help="Path to existing audio file to transcribe")
@@ -309,6 +327,21 @@ def main():
 
     args = parser.parse_args()
 
+    if args.list_devices:
+        try:
+            import sounddevice as sd
+            print("\nAvailable audio input devices:")
+            devices = sd.query_devices()
+            default_input = sd.default.device[0]
+            for idx, dev in enumerate(devices):
+                if dev.get("max_input_channels", 0) > 0:
+                    mark = " [DEFAULT]" if idx == default_input else ""
+                    print(f"  [{idx}] {dev['name']}{mark} (channels: {dev['max_input_channels']})")
+            print("")
+        except Exception as e:
+            print(f"Error querying audio devices: {e}")
+        sys.exit(0)
+
     if args.summary:
         print(f"\n📢 [OpenCode Notification]: {args.summary}")
 
@@ -318,7 +351,7 @@ def main():
     if args.audio_file and Path(args.audio_file).exists():
         audio_file = args.audio_file
     else:
-        audio_file = record_audio(duration=args.duration, language=args.language)
+        audio_file = record_audio(duration=args.duration, language=args.language, input_device=args.input_device)
         temp_audio_created = True
 
     if not audio_file or not Path(audio_file).exists():

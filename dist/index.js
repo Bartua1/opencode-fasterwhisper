@@ -12688,6 +12688,10 @@ var SuperWhisperPlugin = async ({
         if (lang) {
           workerArgs.push("--language", lang);
         }
+        const inputDev = process.env.WHISPER_INPUT_DEVICE;
+        if (inputDev) {
+          workerArgs.push("--input-device", inputDev);
+        }
         const logFilePath = join3(homedir2(), ".config", "opencode", "whisper.log");
         let outFd = "ignore";
         try {
