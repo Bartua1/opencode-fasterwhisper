@@ -14,9 +14,9 @@ var __export = (target, all) => {
 };
 
 // src/index.ts
-import { existsSync as existsSync2, writeFileSync as writeFileSync2, unlinkSync as unlinkSync2, mkdirSync as mkdirSync2 } from "fs";
-import { join as join3 } from "path";
-import { homedir as homedir2 } from "os";
+import { existsSync as existsSync3, writeFileSync as writeFileSync2, unlinkSync as unlinkSync2, mkdirSync as mkdirSync2 } from "fs";
+import { join as join4 } from "path";
+import { homedir as homedir3 } from "os";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -12498,19 +12498,209 @@ function normalizePermissionReply(raw) {
   return "once";
 }
 
-// src/index.ts
-var CANCELLED = "$$CANCELLED$$";
-function findWorkerScript(cwd) {
-  if (process.env.WHISPER_WORKER_PATH && existsSync2(process.env.WHISPER_WORKER_PATH)) {
-    return process.env.WHISPER_WORKER_PATH;
+// src/daemon.ts
+import { spawn } from "child_process";
+import { existsSync as existsSync2 } from "fs";
+import { join as join3 } from "path";
+import { homedir as homedir2 } from "os";
+function findDaemonScript(cwd) {
+  if (process.env.WHISPER_DAEMON_PATH && existsSync2(process.env.WHISPER_DAEMON_PATH)) {
+    return process.env.WHISPER_DAEMON_PATH;
   }
   const candidates = [
-    join3(process.cwd(), "scripts", "whisper_worker.py"),
-    cwd ? join3(cwd, "scripts", "whisper_worker.py") : "",
-    join3(homedir2(), ".config", "opencode", "scripts", "whisper_worker.py")
+    join3(process.cwd(), "scripts", "whisper_daemon.py"),
+    cwd ? join3(cwd, "scripts", "whisper_daemon.py") : "",
+    join3(homedir2(), ".config", "opencode", "scripts", "whisper_daemon.py")
   ].filter(Boolean);
   for (const candidate of candidates) {
     if (existsSync2(candidate))
+      return candidate;
+  }
+  return;
+}
+
+class WhisperDaemonManager {
+  proc = null;
+  scriptPath;
+  log;
+  isReady = false;
+  isBusy = false;
+  restartCount = 0;
+  maxRestarts = 3;
+  intentionalStop = false;
+  constructor(cwd, logFn) {
+    this.scriptPath = findDaemonScript(cwd);
+    this.log = logFn || (() => {});
+  }
+  isAvailable() {
+    return !!this.proc && !this.proc.killed && this.proc.exitCode === null;
+  }
+  start() {
+    if (process.env.WHISPER_NO_DAEMON === "1" || process.env.WHISPER_NO_DAEMON === "true") {
+      this.log("info", "Daemon disabled via WHISPER_NO_DAEMON environment variable");
+      return false;
+    }
+    if (!this.scriptPath) {
+      this.log("info", "No whisper_daemon.py found; daemon mode unavailable");
+      return false;
+    }
+    if (this.isAvailable()) {
+      return true;
+    }
+    this.intentionalStop = false;
+    const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+    const daemonArgs = [
+      this.scriptPath,
+      "--parent-pid",
+      String(process.pid)
+    ];
+    const model = process.env.WHISPER_MODEL;
+    if (model)
+      daemonArgs.push("--model", model);
+    const device = process.env.WHISPER_DEVICE;
+    if (device)
+      daemonArgs.push("--device", device);
+    const computeType = process.env.WHISPER_COMPUTE_TYPE;
+    if (computeType)
+      daemonArgs.push("--compute-type", computeType);
+    this.log("info", `Starting background Whisper daemon: ${pythonBin} ${daemonArgs.join(" ")}`);
+    try {
+      this.proc = spawn(pythonBin, daemonArgs, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUNBUFFERED: "1"
+        }
+      });
+      this.proc.stdout?.setEncoding("utf8");
+      this.proc.stderr?.setEncoding("utf8");
+      let stdoutBuffer = "";
+      this.proc.stdout?.on("data", (chunk) => {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split(`
+`);
+        stdoutBuffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed)
+            continue;
+          try {
+            const data = JSON.parse(trimmed);
+            if (data.status === "ready") {
+              this.isReady = true;
+              this.log("info", `Whisper daemon model is warm in RAM (${data.model || "base"})`);
+            } else if (data.status === "listening") {
+              this.isBusy = true;
+            } else if (data.status === "transcribed" || data.status === "no_speech" || data.status === "cancelled" || data.status === "error") {
+              this.isBusy = false;
+            }
+          } catch {
+            this.log("debug", `Daemon stdout: ${trimmed}`);
+          }
+        }
+      });
+      this.proc.stderr?.on("data", (chunk) => {
+        const text = chunk.trim();
+        if (text) {
+          this.log("debug", text);
+        }
+      });
+      this.proc.on("error", (err) => {
+        this.log("error", `Whisper daemon spawn error: ${err}`);
+      });
+      this.proc.on("exit", (code, signal) => {
+        this.log("info", `Whisper daemon exited with code=${code} signal=${signal}`);
+        this.proc = null;
+        this.isReady = false;
+        this.isBusy = false;
+        if (!this.intentionalStop && this.restartCount < this.maxRestarts) {
+          this.restartCount++;
+          this.log("info", `Attempting daemon restart (${this.restartCount}/${this.maxRestarts})...`);
+          setTimeout(() => this.start(), 1500);
+        }
+      });
+      const exitHandler = () => this.stop();
+      process.once("exit", exitHandler);
+      process.once("SIGINT", exitHandler);
+      process.once("SIGTERM", exitHandler);
+      return true;
+    } catch (err) {
+      this.log("error", `Failed to spawn whisper daemon: ${err}`);
+      return false;
+    }
+  }
+  sendListen(params) {
+    if (!this.isAvailable()) {
+      this.log("warn", "Cannot send listen: daemon is not running");
+      return false;
+    }
+    try {
+      const payload = {
+        cmd: "listen",
+        response_file: params.responseFile,
+        message_file: params.messageFile,
+        summary: params.summary,
+        language: params.language,
+        input_device: params.inputDevice
+      };
+      this.proc?.stdin?.write(JSON.stringify(payload) + `
+`);
+      this.log("info", `Sent listen command to daemon (responseFile=${params.responseFile})`);
+      return true;
+    } catch (err) {
+      this.log("error", `Failed to write listen command to daemon: ${err}`);
+      return false;
+    }
+  }
+  cancel() {
+    if (!this.isAvailable())
+      return false;
+    try {
+      this.proc?.stdin?.write(JSON.stringify({ cmd: "cancel" }) + `
+`);
+      this.log("info", "Sent cancel command to daemon");
+      return true;
+    } catch (err) {
+      this.log("error", `Failed to send cancel to daemon: ${err}`);
+      return false;
+    }
+  }
+  stop() {
+    this.intentionalStop = true;
+    if (!this.proc)
+      return;
+    try {
+      this.proc.stdin?.write(JSON.stringify({ cmd: "quit" }) + `
+`);
+      setTimeout(() => {
+        try {
+          if (this.proc && !this.proc.killed) {
+            this.proc.kill();
+          }
+        } catch {}
+      }, 500);
+    } catch {
+      try {
+        this.proc.kill();
+      } catch {}
+    }
+  }
+}
+
+// src/index.ts
+var CANCELLED = "$$CANCELLED$$";
+function findWorkerScript(cwd) {
+  if (process.env.WHISPER_WORKER_PATH && existsSync3(process.env.WHISPER_WORKER_PATH)) {
+    return process.env.WHISPER_WORKER_PATH;
+  }
+  const candidates = [
+    join4(process.cwd(), "scripts", "whisper_worker.py"),
+    cwd ? join4(cwd, "scripts", "whisper_worker.py") : "",
+    join4(homedir3(), ".config", "opencode", "scripts", "whisper_worker.py")
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (existsSync3(candidate))
       return candidate;
   }
   return;
@@ -12550,7 +12740,7 @@ var SuperWhisperPlugin = async ({
   const sessionTitles = new Map;
   const subagentSessions = new Set;
   const DEBUG = !!process.env.SUPERWHISPER_DEBUG;
-  const LOG_FILE = join3(MESSAGE_DIR, "debug.log");
+  const LOG_FILE = join4(MESSAGE_DIR, "debug.log");
   let appendFileSync;
   if (DEBUG) {
     appendFileSync = (await import("fs")).appendFileSync;
@@ -12570,6 +12760,8 @@ var SuperWhisperPlugin = async ({
 `);
     } catch {}
   }
+  const daemonManager = new WhisperDaemonManager(directory, (level, msg) => log(level, msg));
+  daemonManager.start();
   async function getGitBranch() {
     try {
       return (await $`git -C ${directory} rev-parse --abbrev-ref HEAD`.text()).trim();
@@ -12593,12 +12785,12 @@ var SuperWhisperPlugin = async ({
   function isSessionDisabled(sessionId) {
     if (disabledSessions.has(sessionId))
       return true;
-    return existsSync2(join3(MESSAGE_DIR, `disabled-${sessionId}`));
+    return existsSync3(join4(MESSAGE_DIR, `disabled-${sessionId}`));
   }
   function disableSession(sessionId) {
     disabledSessions.add(sessionId);
     try {
-      writeFileSync2(join3(MESSAGE_DIR, `disabled-${sessionId}`), "");
+      writeFileSync2(join4(MESSAGE_DIR, `disabled-${sessionId}`), "");
     } catch (err) {
       log("error", `Failed to write disabled flag for session=${sessionId}: ${err}`);
     }
@@ -12606,8 +12798,8 @@ var SuperWhisperPlugin = async ({
   function enableSession(sessionId) {
     disabledSessions.delete(sessionId);
     try {
-      const flagPath = join3(MESSAGE_DIR, `disabled-${sessionId}`);
-      if (existsSync2(flagPath)) {
+      const flagPath = join4(MESSAGE_DIR, `disabled-${sessionId}`);
+      if (existsSync3(flagPath)) {
         unlinkSync2(flagPath);
       }
     } catch (err) {
@@ -12630,15 +12822,15 @@ var SuperWhisperPlugin = async ({
       existing.cancel();
       activePolls.delete(pollKey);
     }
-    const messageFile = join3(MESSAGE_DIR, `${pollKey}-message.txt`);
-    const responseFile = join3(MESSAGE_DIR, `${pollKey}-response.txt`);
+    const messageFile = join4(MESSAGE_DIR, `${pollKey}-message.txt`);
+    const responseFile = join4(MESSAGE_DIR, `${pollKey}-response.txt`);
     try {
       writeFileSync2(messageFile, messageContent);
     } catch (err) {
       log("error", `Failed to write message file: ${messageFile} — ${err}`);
       return null;
     }
-    if (existsSync2(responseFile)) {
+    if (existsSync3(responseFile)) {
       log("info", `Removing stale response file for session=${sessionId}`);
       try {
         unlinkSync2(responseFile);
@@ -12669,70 +12861,85 @@ var SuperWhisperPlugin = async ({
     } catch (err) {
       log("info", `Superwhisper desktop app not reachable: ${err}`);
     }
-    const workerScript = findWorkerScript(directory);
-    if (workerScript) {
-      try {
-        const { spawn } = await import("child_process");
-        const { openSync } = await import("fs");
-        const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
-        const workerArgs = [
-          workerScript,
-          "--response-file",
-          responseFile,
-          "--message-file",
-          messageFile,
-          "--summary",
-          summary
-        ];
-        const lang = process.env.WHISPER_LANGUAGE || "es";
-        if (lang) {
-          workerArgs.push("--language", lang);
-        }
-        const inputDev = process.env.WHISPER_INPUT_DEVICE;
-        if (inputDev) {
-          workerArgs.push("--input-device", inputDev);
-        }
-        const logFilePath = join3(homedir2(), ".config", "opencode", "whisper.log");
-        let outFd = "ignore";
-        try {
-          outFd = openSync(logFilePath, "a");
-        } catch {
-          outFd = "ignore";
-        }
-        log("info", `Triggering local faster-whisper worker: ${workerScript} (log: ${logFilePath})`);
-        const workerProc = spawn(pythonBin, workerArgs, {
-          stdio: ["ignore", outFd, outFd],
-          detached: true,
-          env: {
-            ...process.env,
-            PYTHONIOENCODING: "utf-8",
-            PYTHONUNBUFFERED: "1"
-          }
-        });
-        workerProc.on("error", (err) => {
-          log("error", `Failed to spawn whisper worker: ${err}`);
-          try {
-            writeFileSync2(responseFile, "$$NO_SPEECH$$");
-          } catch {}
-        });
-        workerProc.on("exit", (code) => {
-          if (code !== 0) {
-            log("warn", `Whisper worker exited with code ${code}`);
-            setTimeout(() => {
-              if (!existsSync2(responseFile)) {
-                try {
-                  writeFileSync2(responseFile, "$$NO_SPEECH$$");
-                } catch {}
-              }
-            }, 300);
-          }
-        });
-        workerProc.unref();
-      } catch (err) {
-        log("warn", `Could not launch local whisper worker: ${err}`);
+    let triggeredLocal = false;
+    if (daemonManager.isAvailable()) {
+      triggeredLocal = daemonManager.sendListen({
+        responseFile,
+        messageFile,
+        summary,
+        language: process.env.WHISPER_LANGUAGE || "es",
+        inputDevice: process.env.WHISPER_INPUT_DEVICE
+      });
+      if (triggeredLocal) {
+        log("info", "Triggered listening via persistent whisper daemon");
       }
-    } else if (!superwhisperDelivered) {
-      log("warn", "Neither Superwhisper app nor local whisper_worker.py was triggered.");
+    }
+    if (!triggeredLocal) {
+      const workerScript = findWorkerScript(directory);
+      if (workerScript) {
+        try {
+          const { spawn } = await import("child_process");
+          const { openSync } = await import("fs");
+          const pythonBin = process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+          const workerArgs = [
+            workerScript,
+            "--response-file",
+            responseFile,
+            "--message-file",
+            messageFile,
+            "--summary",
+            summary
+          ];
+          const lang = process.env.WHISPER_LANGUAGE || "es";
+          if (lang) {
+            workerArgs.push("--language", lang);
+          }
+          const inputDev = process.env.WHISPER_INPUT_DEVICE;
+          if (inputDev) {
+            workerArgs.push("--input-device", inputDev);
+          }
+          const logFilePath = join4(homedir3(), ".config", "opencode", "whisper.log");
+          let outFd = "ignore";
+          try {
+            outFd = openSync(logFilePath, "a");
+          } catch {
+            outFd = "ignore";
+          }
+          log("info", `Triggering local faster-whisper worker: ${workerScript} (log: ${logFilePath})`);
+          const workerProc = spawn(pythonBin, workerArgs, {
+            stdio: ["ignore", outFd, outFd],
+            detached: true,
+            env: {
+              ...process.env,
+              PYTHONIOENCODING: "utf-8",
+              PYTHONUNBUFFERED: "1"
+            }
+          });
+          workerProc.on("error", (err) => {
+            log("error", `Failed to spawn whisper worker: ${err}`);
+            try {
+              writeFileSync2(responseFile, "$$NO_SPEECH$$");
+            } catch {}
+          });
+          workerProc.on("exit", (code) => {
+            if (code !== 0) {
+              log("warn", `Whisper worker exited with code ${code}`);
+              setTimeout(() => {
+                if (!existsSync3(responseFile)) {
+                  try {
+                    writeFileSync2(responseFile, "$$NO_SPEECH$$");
+                  } catch {}
+                }
+              }, 300);
+            }
+          });
+          workerProc.unref();
+        } catch (err) {
+          log("warn", `Could not launch local whisper worker: ${err}`);
+        }
+      } else if (!superwhisperDelivered) {
+        log("warn", "Neither Superwhisper app nor local whisper_worker.py was triggered.");
+      }
     }
     log("info", `Notification sent: status=${status} session=${sessionId}`);
     let cancelled = false;
@@ -12755,22 +12962,22 @@ var SuperWhisperPlugin = async ({
     if (response === null || response.trim() === "$$NO_SPEECH$$" || response.trim() === "$$EMPTY$$") {
       log("info", `Poll completed with no speech for session=${sessionId}`);
       try {
-        if (existsSync2(responseFile))
+        if (existsSync3(responseFile))
           unlinkSync2(responseFile);
       } catch {}
       try {
-        if (existsSync2(messageFile))
+        if (existsSync3(messageFile))
           unlinkSync2(messageFile);
       } catch {}
       return null;
     }
     log("info", `Poll got response for session=${sessionId}: "${response.substring(0, 200)}"`);
     try {
-      if (existsSync2(responseFile))
+      if (existsSync3(responseFile))
         unlinkSync2(responseFile);
     } catch {}
     try {
-      if (existsSync2(messageFile))
+      if (existsSync3(messageFile))
         unlinkSync2(messageFile);
     } catch {}
     return response;
@@ -12827,6 +13034,7 @@ var SuperWhisperPlugin = async ({
     });
   }
   function cancelPoll(pollKey, source) {
+    daemonManager.cancel();
     const poll = activePolls.get(pollKey);
     if (poll) {
       poll.cancel();
@@ -13022,15 +13230,15 @@ var SuperWhisperPlugin = async ({
       return;
     }
     log("info", `Permission requested: id=${permissionId} type=${permissionType}`);
-    const bypassFile = join3(MESSAGE_DIR, `${sessionId}-bypass-perms`);
-    if (existsSync2(bypassFile)) {
+    const bypassFile = join4(MESSAGE_DIR, `${sessionId}-bypass-perms`);
+    if (existsSync3(bypassFile)) {
       log("info", `Bypass-perms active for session=${sessionId}, auto-allowing ${permissionType}`);
       repliedPermissionIds.add(permissionId);
       await replyToPermission(permissionId, "once");
       return;
     }
     permissionActiveForSession.add(sessionId);
-    const responseFile = join3(MESSAGE_DIR, `${permissionId}-response.txt`);
+    const responseFile = join4(MESSAGE_DIR, `${permissionId}-response.txt`);
     activePermissionResponseFiles.set(permissionId, responseFile);
     const summary = `Permission needed: ${permissionType}`;
     const permissionPayload = JSON.stringify({
@@ -13107,7 +13315,7 @@ var SuperWhisperPlugin = async ({
     },
     tool: {
       whisper_dictate: tool({
-        description: "Listen to the user's microphone and transcribe their spoken instruction using local Faster-Whisper.",
+        description: "Listen to the user's microphone and transcribe their spoken instruction using local Faster-Whisper. Call this tool IMMEDIATELY without any conversational preamble or introductory text when listening to the user.",
         args: {
           prompt: tool.schema.string().optional()
         },

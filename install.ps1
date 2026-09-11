@@ -61,7 +61,7 @@ Write-Host "[+] Plugin copied to $pluginDir\whisper.js" -ForegroundColor Green
 
 # Copy python workers and download scripts
 Copy-Item "$scriptDir\scripts\*" "$scriptsTargetDir" -Recurse -Force
-Write-Host "[+] Worker scripts copied to $scriptsTargetDir" -ForegroundColor Green
+Write-Host "[+] Worker and daemon scripts copied to $scriptsTargetDir" -ForegroundColor Green
 
 # 5. Check if local model exists
 $modelDir = Join-Path $scriptDir "models\base"

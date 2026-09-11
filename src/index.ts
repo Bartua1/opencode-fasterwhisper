@@ -14,6 +14,7 @@ import {
   normalizeQuestions,
   normalizePermissionReply,
 } from "./normalize.js"
+import { WhisperDaemonManager } from "./daemon.js"
 
 export type { DeeplinkParams }
 
@@ -132,6 +133,12 @@ export const SuperWhisperPlugin: Plugin = async ({
       )
     } catch {}
   }
+
+  // Background warm Whisper daemon
+  const daemonManager = new WhisperDaemonManager(directory, (level, msg) =>
+    log(level, msg),
+  )
+  daemonManager.start()
 
   // --- Helpers ---
 
@@ -270,9 +277,24 @@ export const SuperWhisperPlugin: Plugin = async ({
       )
     }
 
-    // Launch local faster-whisper worker if available
-    const workerScript = findWorkerScript(directory)
-    if (workerScript) {
+    // Launch local faster-whisper (warm daemon preferred, one-shot worker fallback)
+    let triggeredLocal = false
+    if (daemonManager.isAvailable()) {
+      triggeredLocal = daemonManager.sendListen({
+        responseFile,
+        messageFile,
+        summary,
+        language: process.env.WHISPER_LANGUAGE || "es",
+        inputDevice: process.env.WHISPER_INPUT_DEVICE,
+      })
+      if (triggeredLocal) {
+        log("info", "Triggered listening via persistent whisper daemon")
+      }
+    }
+
+    if (!triggeredLocal) {
+      const workerScript = findWorkerScript(directory)
+      if (workerScript) {
       try {
         const { spawn } = await import("child_process")
         const { openSync } = await import("fs")
@@ -343,6 +365,7 @@ export const SuperWhisperPlugin: Plugin = async ({
       }
     } else if (!superwhisperDelivered) {
       log("warn", "Neither Superwhisper app nor local whisper_worker.py was triggered.")
+    }
     }
 
     log("info", `Notification sent: status=${status} session=${sessionId}`)
@@ -467,6 +490,7 @@ export const SuperWhisperPlugin: Plugin = async ({
   }
 
   function cancelPoll(pollKey: string, source: string): boolean {
+    daemonManager.cancel()
     const poll = activePolls.get(pollKey)
     if (poll) {
       poll.cancel()
@@ -833,7 +857,7 @@ export const SuperWhisperPlugin: Plugin = async ({
     tool: {
       whisper_dictate: tool({
         description:
-          "Listen to the user's microphone and transcribe their spoken instruction using local Faster-Whisper.",
+          "Listen to the user's microphone and transcribe their spoken instruction using local Faster-Whisper. Call this tool IMMEDIATELY without any conversational preamble or introductory text when listening to the user.",
         args: {
           prompt: tool.schema.string().optional(),
         },

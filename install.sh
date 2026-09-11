@@ -54,7 +54,8 @@ cp "$SCRIPT_DIR/dist/index.js" "$PLUGIN_DIR/whisper.js"
 echo "[+] Plugin copied to $PLUGIN_DIR/whisper.js"
 
 cp -r "$SCRIPT_DIR/scripts/"* "$SCRIPTS_DIR/"
-echo "[+] Worker scripts copied to $SCRIPTS_DIR"
+chmod +x "$SCRIPTS_DIR"/*.py 2>/dev/null || true
+echo "[+] Worker and daemon scripts copied to $SCRIPTS_DIR"
 
 # 5. Check if local model exists
 MODEL_DIR="$SCRIPT_DIR/models/base"
