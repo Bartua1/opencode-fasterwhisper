@@ -9,17 +9,15 @@ import {
 } from "./index.js"
 import type { DeeplinkParams } from "./index.js"
 import { __setInboxDirForTest, type InboxPayload } from "./inbox.js"
+import { MESSAGE_DIR } from "./types.js"
 import { unlink, mkdir, readdir, readFile, rm } from "node:fs/promises"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, existsSync } from "node:fs"
 import { join } from "node:path"
 
 const TEST_INBOX_DIR = "/tmp/superwhisper-test-inbox"
 __setInboxDirForTest(TEST_INBOX_DIR)
 
-// The plugin uses `$\`mkdir -p ...\`` to create its working dir at init.
-// Tests mock `$`, so the command never runs — create the dir directly here
-// so writeFileSync calls inside the plugin succeed on a clean runner.
-mkdirSync("/tmp/superwhisper-agent", { recursive: true })
+mkdirSync(MESSAGE_DIR, { recursive: true })
 
 async function clearInbox() {
   try {
@@ -390,7 +388,6 @@ describe("pollForResponse", () => {
 // --- Plugin integration helpers ---
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const MESSAGE_DIR = "/tmp/superwhisper-agent"
 
 function makeAssistantMessage(text: string, endReason: string = "end_turn") {
   return {
@@ -461,10 +458,10 @@ async function initPlugin(opts?: {
 
 async function cleanupSession(sessionId: string) {
   try {
-    await unlink(`${MESSAGE_DIR}/${sessionId}-response.txt`)
+    await unlink(join(MESSAGE_DIR, `${sessionId}-response.txt`))
   } catch {}
   try {
-    await unlink(`${MESSAGE_DIR}/${sessionId}-message.txt`)
+    await unlink(join(MESSAGE_DIR, `${sessionId}-message.txt`))
   } catch {}
 }
 
@@ -472,7 +469,7 @@ async function writeResponse(
   sessionId: string,
   text: string = "voice response",
 ) {
-  await Bun.write(`${MESSAGE_DIR}/${sessionId}-response.txt`, text)
+  await Bun.write(join(MESSAGE_DIR, `${sessionId}-response.txt`), text)
 }
 
 
@@ -494,10 +491,8 @@ describe("SuperWhisperPlugin", () => {
   })
 
   it("creates temp directory on init", async () => {
-    const { shellCommands } = await initPlugin()
-    const mkdirCmd = shellCommands.find((c) => c.includes("mkdir"))
-    expect(mkdirCmd).toBeDefined()
-    expect(mkdirCmd).toContain("/tmp/superwhisper-agent")
+    await initPlugin()
+    expect(existsSync(MESSAGE_DIR)).toBe(true)
   })
 
   it("ignores session.idle without sessionID", async () => {

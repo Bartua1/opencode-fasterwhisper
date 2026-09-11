@@ -1,5 +1,11 @@
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 export const LOG_PREFIX = "[@superwhisper/opencode]"
-export const MESSAGE_DIR = "/tmp/superwhisper-agent"
+export const MESSAGE_DIR =
+  process.platform === "win32"
+    ? join(tmpdir(), "superwhisper-agent")
+    : "/tmp/superwhisper-agent"
 export const POLL_INTERVAL_MS = 1_000
 export const POLL_TIMEOUT_MS = 30 * 60 * 1_000
 

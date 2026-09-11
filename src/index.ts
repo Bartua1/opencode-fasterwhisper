@@ -1,4 +1,5 @@
-import { existsSync, writeFileSync, unlinkSync } from "fs"
+import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "fs"
+import { join } from "path"
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
 import { LOG_PREFIX, MESSAGE_DIR, POLL_TIMEOUT_MS, POLL_INTERVAL_MS } from "./types.js"
@@ -31,11 +32,13 @@ async function detectScheme($: any): Promise<string> {
   const envScheme = process.env.SUPERWHISPER_SCHEME
   if (envScheme) return envScheme
 
-  try {
-    const result = await $`pgrep -f "DerivedData.*superwhisper.app"`.quiet()
-    if (result.exitCode === 0) return "superwhisper-debug"
-  } catch {
-    // pgrep failed or not found
+  if (process.platform === "darwin") {
+    try {
+      const result = await $`pgrep -f "DerivedData.*superwhisper.app"`.quiet()
+      if (result.exitCode === 0) return "superwhisper-debug"
+    } catch {
+      // pgrep failed or not found
+    }
   }
 
   return "superwhisper"
@@ -49,7 +52,9 @@ export const SuperWhisperPlugin: Plugin = async ({
   serverUrl,
 }) => {
   const scheme = await detectScheme($)
-  await $`mkdir -p ${MESSAGE_DIR}`
+  try {
+    mkdirSync(MESSAGE_DIR, { recursive: true })
+  } catch {}
 
   // --- Internal state ---
 
@@ -94,7 +99,7 @@ export const SuperWhisperPlugin: Plugin = async ({
   // --- Logging ---
 
   const DEBUG = !!process.env.SUPERWHISPER_DEBUG
-  const LOG_FILE = `${MESSAGE_DIR}/debug.log`
+  const LOG_FILE = join(MESSAGE_DIR, "debug.log")
   let appendFileSync: typeof import("fs").appendFileSync | undefined
 
   if (DEBUG) {
@@ -152,13 +157,13 @@ export const SuperWhisperPlugin: Plugin = async ({
 
   function isSessionDisabled(sessionId: string): boolean {
     if (disabledSessions.has(sessionId)) return true
-    return existsSync(`${MESSAGE_DIR}/disabled-${sessionId}`)
+    return existsSync(join(MESSAGE_DIR, `disabled-${sessionId}`))
   }
 
   function disableSession(sessionId: string): void {
     disabledSessions.add(sessionId)
     try {
-      writeFileSync(`${MESSAGE_DIR}/disabled-${sessionId}`, "")
+      writeFileSync(join(MESSAGE_DIR, `disabled-${sessionId}`), "")
     } catch (err) {
       log("error", `Failed to write disabled flag for session=${sessionId}: ${err}`)
     }
@@ -167,7 +172,7 @@ export const SuperWhisperPlugin: Plugin = async ({
   function enableSession(sessionId: string): void {
     disabledSessions.delete(sessionId)
     try {
-      const flagPath = `${MESSAGE_DIR}/disabled-${sessionId}`
+      const flagPath = join(MESSAGE_DIR, `disabled-${sessionId}`)
       if (existsSync(flagPath)) {
         unlinkSync(flagPath)
       }
@@ -205,8 +210,8 @@ export const SuperWhisperPlugin: Plugin = async ({
       activePolls.delete(pollKey)
     }
 
-    const messageFile = `${MESSAGE_DIR}/${pollKey}-message.txt`
-    const responseFile = `${MESSAGE_DIR}/${pollKey}-response.txt`
+    const messageFile = join(MESSAGE_DIR, `${pollKey}-message.txt`)
+    const responseFile = join(MESSAGE_DIR, `${pollKey}-response.txt`)
 
     try {
       writeFileSync(messageFile, messageContent)
@@ -297,7 +302,10 @@ export const SuperWhisperPlugin: Plugin = async ({
     )
 
     try {
-      await $`rm -f ${responseFile} ${messageFile}`.quiet()
+      if (existsSync(responseFile)) unlinkSync(responseFile)
+    } catch {}
+    try {
+      if (existsSync(messageFile)) unlinkSync(messageFile)
     } catch {}
 
     return response
@@ -597,7 +605,7 @@ export const SuperWhisperPlugin: Plugin = async ({
     log("info", `Permission requested: id=${permissionId} type=${permissionType}`)
 
     // Check session-wide bypass — auto-allow without prompting
-    const bypassFile = `${MESSAGE_DIR}/${sessionId}-bypass-perms`
+    const bypassFile = join(MESSAGE_DIR, `${sessionId}-bypass-perms`)
     if (existsSync(bypassFile)) {
       log("info", `Bypass-perms active for session=${sessionId}, auto-allowing ${permissionType}`)
       repliedPermissionIds.add(permissionId)
@@ -607,7 +615,7 @@ export const SuperWhisperPlugin: Plugin = async ({
 
     permissionActiveForSession.add(sessionId)
 
-    const responseFile = `${MESSAGE_DIR}/${permissionId}-response.txt`
+    const responseFile = join(MESSAGE_DIR, `${permissionId}-response.txt`)
     activePermissionResponseFiles.set(permissionId, responseFile)
 
     const summary = `Permission needed: ${permissionType}`

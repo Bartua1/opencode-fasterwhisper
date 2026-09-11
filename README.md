@@ -1,21 +1,30 @@
 # @superwhisper/opencode
 
-Superwhisper voice integration plugin for [OpenCode](https://opencode.ai).
+Superwhisper voice integration plugin for [OpenCode](https://opencode.ai), supporting both **Windows** and **macOS**.
+
+> **Note**: This is a cross-platform fork of [superultrainc/opencode-superwhisper](https://github.com/superultrainc/opencode-superwhisper) adding full Windows compatibility, resolving directory permissions (`/tmp` vs `%TEMP%`), cross-platform process management, and Windows protocol launching.
 
 Get voice notifications when your AI coding tasks complete, and respond with your voice. Your voice response is sent back to OpenCode as the next prompt, creating a hands-free coding loop.
 
 ## Requirements
 
 - [OpenCode](https://opencode.ai) v1.0+
-- [Superwhisper](https://superwhisper.com) app for macOS
+- [Superwhisper](https://superwhisper.com) app (macOS or Windows)
 
 ## Installation
 
+### macOS / Linux
 ```bash
-curl -fsSL https://superwhisper.com/install-opencode.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Bartua1/opencode-superwhisper/main/install.sh | bash
 ```
 
-Or manually add to your `~/.config/opencode/opencode.json`:
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/Bartua1/opencode-superwhisper/main/install.ps1 | iex
+```
+
+### Manual Configuration
+Add to your OpenCode configuration file (`~/.config/opencode/opencode.json` on macOS/Linux or `%USERPROFILE%\.config\opencode\opencode.json` on Windows):
 
 ```json
 {
@@ -24,7 +33,7 @@ Or manually add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-OpenCode will resolve the plugin from npm automatically.
+OpenCode will resolve the plugin automatically.
 
 ## How It Works
 

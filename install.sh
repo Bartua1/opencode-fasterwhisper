@@ -8,4 +8,10 @@ fi
 
 opencode plugin -g -f @superwhisper/opencode </dev/null
 
-open "superwhisper://agent-installed?agent=opencode"
+if command -v open &>/dev/null; then
+    open "superwhisper://agent-installed?agent=opencode"
+elif command -v cmd.exe &>/dev/null; then
+    cmd.exe /c start "" "superwhisper://agent-installed?agent=opencode"
+elif command -v xdg-open &>/dev/null; then
+    xdg-open "superwhisper://agent-installed?agent=opencode"
+fi

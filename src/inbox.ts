@@ -20,10 +20,19 @@ export interface InboxPayload {
   hookPid?: number
 }
 
-let INBOX_DIR = join(
-  homedir(),
-  "Library/Application Support/superwhisper/agent/inbox",
-)
+function getDefaultInboxDir(): string {
+  if (process.platform === "win32") {
+    const appData =
+      process.env.APPDATA || join(homedir(), "AppData", "Roaming")
+    return join(appData, "superwhisper", "agent", "inbox")
+  }
+  return join(
+    homedir(),
+    "Library/Application Support/superwhisper/agent/inbox",
+  )
+}
+
+let INBOX_DIR = getDefaultInboxDir()
 
 export function __setInboxDirForTest(dir: string): void {
   INBOX_DIR = dir
@@ -54,6 +63,14 @@ export function writeInboxPayload(payload: InboxPayload): boolean {
 
 export async function isSuperwhisperRunning($: any): Promise<boolean> {
   try {
+    if (process.platform === "win32") {
+      const result = await $`tasklist /FI "IMAGENAME eq superwhisper.exe" /NH`.quiet()
+      const text =
+        typeof result?.text === "function"
+          ? await result.text()
+          : (result?.stdout?.toString() ?? "")
+      return text.toLowerCase().includes("superwhisper")
+    }
     const result = await $`pgrep -x superwhisper`.quiet()
     return result.exitCode === 0
   } catch {
@@ -64,7 +81,13 @@ export async function isSuperwhisperRunning($: any): Promise<boolean> {
 export async function fireAgentWake(scheme: string, $: any): Promise<void> {
   const url = `${scheme}://agent-wake`
   try {
-    await $`open ${url}`.quiet()
+    if (process.platform === "win32") {
+      await $`cmd.exe /c start "" ${url}`.quiet()
+    } else if (process.platform === "darwin") {
+      await $`open ${url}`.quiet()
+    } else {
+      await $`xdg-open ${url}`.quiet()
+    }
   } catch {
     // wake is best-effort
   }
