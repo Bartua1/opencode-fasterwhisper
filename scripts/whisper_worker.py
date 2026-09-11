@@ -107,14 +107,14 @@ def play_sound(sound_name: str):
 
 def record_audio(
     duration: float = None,
-    silence_timeout: float = 1.5,
-    max_wait_speech: float = 12.0,
+    silence_timeout: float = 1.0,
+    max_wait_speech: float = 10.0,
     sample_rate: int = 16000
 ) -> str:
     """
     Record audio from default microphone using smart silence detection.
     - Plays audio chime and shows system notification.
-    - Auto-detects speech onset and terminates when user finishes speaking (1.5s silence).
+    - Auto-detects speech onset and terminates when user finishes speaking (1.0s silence).
     - If in an interactive TTY, also allows pressing [Enter] to stop.
     """
     import tempfile
@@ -235,9 +235,17 @@ def record_audio(
 
     return temp_wav_path
 
-def transcribe_audio(audio_path: str, model_id_or_path: str, device: str = "cpu", compute_type: str = "int8", language: str = None) -> str:
+def transcribe_audio(
+    audio_path: str,
+    model_id_or_path: str,
+    device: str = "cpu",
+    compute_type: str = "int8",
+    language: str = None,
+    beam_size: int = 1,
+) -> str:
     """
     Transcribe audio file using faster-whisper.
+    Uses greedy decoding (beam_size=1) and Silero vad_filter for ~5x faster inference.
     """
     try:
         from faster_whisper import WhisperModel
@@ -246,14 +254,20 @@ def transcribe_audio(audio_path: str, model_id_or_path: str, device: str = "cpu"
         print("Please run: pip install faster-whisper")
         sys.exit(1)
 
-    print(f"[OpenCode Whisper] Loading Whisper model ({device}, {compute_type})...")
-    model = WhisperModel(model_id_or_path, device=device, compute_type=compute_type)
+    print(f"[OpenCode Whisper] Loading Whisper model ({device}, {compute_type}, beam={beam_size})...")
+    model = WhisperModel(model_id_or_path, device=device, compute_type=compute_type, cpu_threads=4)
 
     kwargs = {}
     if language:
         kwargs["language"] = language
 
-    segments, info = model.transcribe(audio_path, beam_size=5, **kwargs)
+    segments, info = model.transcribe(
+        audio_path,
+        beam_size=beam_size,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=400),
+        **kwargs
+    )
     text_parts = [segment.text for segment in segments]
     full_text = " ".join(text_parts).strip()
 
@@ -267,6 +281,7 @@ def main():
     parser.add_argument("--duration", type=float, default=None, help="Recording duration in seconds (if omitted, waits for Enter)")
     parser.add_argument("--device", type=str, default=os.environ.get("WHISPER_DEVICE", "cpu"), choices=["cpu", "cuda", "auto"], help="Inference device")
     parser.add_argument("--compute-type", type=str, default=os.environ.get("WHISPER_COMPUTE_TYPE", "int8"), help="Compute type (e.g. int8, float16, float32)")
+    parser.add_argument("--beam-size", type=int, default=int(os.environ.get("WHISPER_BEAM_SIZE", "1")), help="Beam size (1=greedy/fastest, 5=standard)")
     parser.add_argument("--language", type=str, default=os.environ.get("WHISPER_LANGUAGE", None), help="Language code (e.g. en, es, zh, auto)")
     parser.add_argument("--response-file", type=str, default=None, help="File to write the transcribed text to")
     parser.add_argument("--message-file", type=str, default=None, help="OpenCode message file containing task info")
@@ -297,6 +312,7 @@ def main():
             device=args.device,
             compute_type=args.compute_type,
             language=args.language,
+            beam_size=args.beam_size,
         )
 
         print(f"\n✨ [OpenCode Whisper Result]: \"{text}\"\n")
