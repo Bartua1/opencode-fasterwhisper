@@ -52,10 +52,70 @@ def resolve_model(model_name: str, explicit_path: str = None) -> str:
     print(f"[OpenCode Whisper] No local model found in candidates, falling back to model identifier: '{model_name}'")
     return model_name
 
-def record_audio(duration: float = None, sample_rate: int = 16000) -> str:
+import subprocess
+
+def notify(title: str, message: str, sound: str = None):
+    """Display system notification and optional sound."""
+    if sys.platform == "darwin":
+        sound_clause = f' sound name "{sound}"' if sound else ''
+        cmd = f'display notification "{message}" with title "{title}"{sound_clause}'
+        try:
+            subprocess.run(["osascript", "-e", cmd], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import winsound
+            winsound.MessageBeep()
+        except:
+            pass
+        ps_cmd = f'''
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+        $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+        $textNodes = $template.GetElementsByTagName("text")
+        $textNodes.Item(0).AppendChild($template.CreateTextNode("{title}")) > $null
+        $textNodes.Item(1).AppendChild($template.CreateTextNode("{message}")) > $null
+        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("OpenCode Whisper")
+        $notification = [Windows.UI.Notifications.ToastNotification]::new($template)
+        $notifier.Show($notification)
+        '''
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            pass
+    else:
+        try:
+            subprocess.run(["notify-send", title, message], check=False)
+        except:
+            pass
+
+def play_sound(sound_name: str):
+    """Play audio cue."""
+    if sys.platform == "darwin":
+        sound_path = f"/System/Library/Sounds/{sound_name}.aiff"
+        if os.path.exists(sound_path):
+            try:
+                subprocess.Popen(["afplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+    elif sys.platform == "win32":
+        try:
+            import winsound
+            winsound.MessageBeep()
+        except:
+            pass
+
+def record_audio(
+    duration: float = None,
+    silence_timeout: float = 1.5,
+    max_wait_speech: float = 12.0,
+    sample_rate: int = 16000
+) -> str:
     """
-    Record audio from default microphone using sounddevice or fallback.
-    Records until Enter is pressed or fixed duration.
+    Record audio from default microphone using smart silence detection.
+    - Plays audio chime and shows system notification.
+    - Auto-detects speech onset and terminates when user finishes speaking (1.5s silence).
+    - If in an interactive TTY, also allows pressing [Enter] to stop.
     """
     import tempfile
     import wave
@@ -78,24 +138,21 @@ def record_audio(duration: float = None, sample_rate: int = 16000) -> str:
         q.put(indata.copy())
 
     print("\n" + "="*50)
-    print("🎙️  [OpenCode Whisper] Listening...")
-    if duration:
-        print(f"Recording for {duration} seconds...")
-    else:
-        print("Speak your response. Press [ENTER] when done speaking:")
+    print("🎙️  [OpenCode Whisper] Listening... Speak your prompt now.")
     print("="*50)
 
-    # Input listener thread for Enter key
-    def wait_for_enter():
-        try:
-            sys.stdin.readline()
-        except:
-            pass
-        stop_event.set()
+    # Audio cue & desktop notification
+    notify("🎙️ OpenCode Whisper", "Listening for your voice... Speak now.", sound="Tink")
 
-    if not duration:
-        listener_thread = threading.Thread(target=wait_for_enter, daemon=True)
-        listener_thread.start()
+    # Interactive Enter listener (only if attached to a real terminal)
+    if not duration and sys.stdin and sys.stdin.isatty():
+        def wait_for_enter():
+            try:
+                sys.stdin.readline()
+            except:
+                pass
+            stop_event.set()
+        threading.Thread(target=wait_for_enter, daemon=True).start()
 
     temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     temp_wav_path = temp_wav.name
@@ -103,21 +160,68 @@ def record_audio(duration: float = None, sample_rate: int = 16000) -> str:
 
     recorded_chunks = []
     start_time = time.time()
+    speech_started = False
+    silence_start_time = None
 
-    with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16", callback=callback):
+    # Noise floor calibration over first 300ms
+    calibration_chunks = []
+    threshold = 600.0
+
+    chunk_duration = 0.1  # 100ms
+    block_size = int(sample_rate * chunk_duration)
+
+    with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16", blocksize=block_size, callback=callback):
         while not stop_event.is_set():
-            if duration and (time.time() - start_time >= duration):
+            now = time.time()
+            elapsed = now - start_time
+
+            # Fixed duration limit
+            if duration and elapsed >= duration:
                 break
+
+            # Timeout if no speech detected at all
+            if not speech_started and elapsed >= max_wait_speech:
+                print("⏱️ [OpenCode Whisper] No speech detected within timeout.")
+                break
+
             try:
-                chunk = q.get(timeout=0.1)
+                chunk = q.get(timeout=0.15)
                 recorded_chunks.append(chunk)
+
+                # Calculate RMS energy of chunk
+                energy = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
+
+                # Calibrate noise floor
+                if elapsed < 0.3:
+                    calibration_chunks.append(energy)
+                    continue
+                elif len(calibration_chunks) > 0:
+                    ambient = float(np.mean(calibration_chunks)) if calibration_chunks else 300.0
+                    threshold = max(ambient * 2.2, 500.0)
+                    calibration_chunks = []
+
+                # Silence detection state machine
+                if energy > threshold:
+                    if not speech_started:
+                        speech_started = True
+                        print("🗣️  [OpenCode Whisper] Speech detected...")
+                    silence_start_time = None
+                elif speech_started:
+                    if silence_start_time is None:
+                        silence_start_time = now
+                    elif now - silence_start_time >= silence_timeout:
+                        print("🤫 [OpenCode Whisper] Silence detected. Stopping recording...")
+                        break
+
             except queue.Empty:
                 pass
 
+    play_sound("Pop")
     print("🛑 [OpenCode Whisper] Recording stopped. Transcribing...")
+    notify("📝 OpenCode Whisper", "Transcribing your audio...", sound="Pop")
 
-    if not recorded_chunks:
-        print("[OpenCode Whisper] No audio captured.")
+    if not recorded_chunks or not speech_started:
+        print("[OpenCode Whisper] No speech was captured.")
         return ""
 
     audio_data = np.concatenate(recorded_chunks, axis=0)
@@ -196,6 +300,7 @@ def main():
         )
 
         print(f"\n✨ [OpenCode Whisper Result]: \"{text}\"\n")
+        notify("✅ OpenCode Whisper", f'"{text}"', sound="Glass")
 
         if args.response_file:
             response_path = Path(args.response_file)
