@@ -193,14 +193,12 @@ def record_audio(
     speech_started = False
     silence_start_time = None
 
-    # Noise floor calibration over first 300ms
-    calibration_chunks = []
-    threshold = 600.0
+    # Use float32 with 1024 blocksize, exactly like VoiceControl
+    block_size = 1024
+    ambient_samples = []
+    threshold = 0.015  # Reasonable normalized speech threshold for float32
 
-    chunk_duration = 0.1  # 100ms
-    block_size = int(sample_rate * chunk_duration)
-
-    with sd.InputStream(device=device_id, samplerate=sample_rate, channels=1, dtype="int16", blocksize=block_size, callback=callback):
+    with sd.InputStream(device=device_id, samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_size, callback=callback):
         while not stop_event.is_set():
             now = time.time()
             elapsed = now - start_time
@@ -209,7 +207,7 @@ def record_audio(
             if duration and elapsed >= duration:
                 break
 
-            # Timeout if no speech detected at all
+            # Timeout only after max_wait_speech (e.g. 10s)
             if not speech_started and elapsed >= max_wait_speech:
                 timeout_msg = "⏱️ [OpenCode Whisper] No se detectó voz dentro del tiempo límite." if is_es else "⏱️ [OpenCode Whisper] No speech detected within timeout."
                 print(timeout_msg)
@@ -219,19 +217,20 @@ def record_audio(
                 chunk = q.get(timeout=0.15)
                 recorded_chunks.append(chunk)
 
-                # Calculate RMS energy of chunk
-                energy = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
+                # Calculate RMS energy of chunk (float32 values are between -1.0 and 1.0)
+                energy = float(np.sqrt(np.mean(chunk ** 2)))
 
-                # Calibrate noise floor
-                if elapsed < 0.3:
-                    calibration_chunks.append(energy)
+                # Dynamic ambient baseline
+                if elapsed < 0.4:
+                    ambient_samples.append(energy)
                     continue
-                elif len(calibration_chunks) > 0:
-                    ambient = float(np.mean(calibration_chunks)) if calibration_chunks else 300.0
-                    threshold = max(ambient * 2.2, 500.0)
-                    calibration_chunks = []
+                elif len(ambient_samples) > 0:
+                    ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.005
+                    # Speech threshold is at least ambient * 2.5 or a minimum sensible floor
+                    threshold = max(ambient * 2.5, 0.012)
+                    ambient_samples = []
 
-                # Silence detection state machine
+                # Speech / silence state machine
                 if energy > threshold:
                     if not speech_started:
                         speech_started = True
@@ -255,19 +254,24 @@ def record_audio(
     transcribing_notify = "Transcribiendo tu voz..." if is_es else "Transcribing your audio..."
     notify("📝 OpenCode Whisper", transcribing_notify, sound="Pop")
 
-    if not recorded_chunks or not speech_started:
-        no_speech_msg = "[OpenCode Whisper] No se capturó voz." if is_es else "[OpenCode Whisper] No speech was captured."
+    if not recorded_chunks:
+        no_speech_msg = "[OpenCode Whisper] No se capturó audio." if is_es else "[OpenCode Whisper] No audio captured."
         print(no_speech_msg)
         return ""
 
-    audio_data = np.concatenate(recorded_chunks, axis=0)
+    # Even if speech_started wasn't triggered by RMS, if the user pressed Enter or recorded chunks exist,
+    # let faster-whisper's built-in Silero VAD do the authoritative voice detection!
+    audio_float = np.concatenate(recorded_chunks, axis=0).flatten()
+    
+    # Scale float32 (-1.0 to 1.0) to 16-bit PCM for WAV compatibility
+    audio_int16 = np.clip(audio_float * 32767, -32768, 32767).astype(np.int16)
 
     # Write WAV file
     with wave.open(temp_wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)  # 16-bit
         wf.setframerate(sample_rate)
-        wf.writeframes(audio_data.tobytes())
+        wf.writeframes(audio_int16.tobytes())
 
     return temp_wav_path
 
