@@ -312,6 +312,11 @@ export const SuperWhisperPlugin: Plugin = async ({
           {
             stdio: ["ignore", outFd, outFd],
             detached: true,
+            env: {
+              ...process.env,
+              PYTHONIOENCODING: "utf-8",
+              PYTHONUNBUFFERED: "1",
+            },
           },
         )
         workerProc.unref()

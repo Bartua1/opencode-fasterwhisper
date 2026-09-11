@@ -12702,7 +12702,12 @@ var SuperWhisperPlugin = async ({
         log("info", `Triggering local faster-whisper worker: ${workerScript} (log: ${logFilePath})`);
         const workerProc = spawn(pythonBin, workerArgs, {
           stdio: ["ignore", outFd, outFd],
-          detached: true
+          detached: true,
+          env: {
+            ...process.env,
+            PYTHONIOENCODING: "utf-8",
+            PYTHONUNBUFFERED: "1"
+          }
         });
         workerProc.unref();
       } catch (err) {
