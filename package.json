@@ -33,11 +33,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Bartua1/opencode-superwhisper"
+    "url": "https://github.com/Bartua1/opencode-fasterwhisper"
   },
-  "homepage": "https://superwhisper.com",
+  "homepage": "https://github.com/Bartua1/opencode-fasterwhisper",
   "bugs": {
-    "url": "https://github.com/Bartua1/opencode-superwhisper/issues"
+    "url": "https://github.com/Bartua1/opencode-fasterwhisper/issues"
   },
   "publishConfig": {
     "access": "public"
