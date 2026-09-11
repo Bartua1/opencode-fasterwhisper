@@ -15,16 +15,6 @@ import {
   normalizePermissionReply,
 } from "./normalize.js"
 
-export {
-  buildDeeplinkUrl,
-  extractFullText,
-  isEndTurn,
-  extractSummary,
-  pollForResponse,
-  parseQuestionResponse,
-  normalizeQuestions,
-  normalizePermissionReply,
-}
 export type { DeeplinkParams }
 
 const CANCELLED = "$$CANCELLED$$"
