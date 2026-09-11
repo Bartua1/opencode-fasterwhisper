@@ -109,7 +109,8 @@ def record_audio(
     duration: float = None,
     silence_timeout: float = 1.0,
     max_wait_speech: float = 10.0,
-    sample_rate: int = 16000
+    sample_rate: int = 16000,
+    language: str = "es"
 ) -> str:
     """
     Record audio from default microphone using smart silence detection.
@@ -137,12 +138,15 @@ def record_audio(
             pass
         q.put(indata.copy())
 
+    is_es = (language == "es")
+    prompt_msg = "🎙️  [OpenCode Whisper] Escuchando... Di tu instrucción ahora." if is_es else "🎙️  [OpenCode Whisper] Listening... Speak your prompt now."
     print("\n" + "="*50)
-    print("🎙️  [OpenCode Whisper] Listening... Speak your prompt now.")
+    print(prompt_msg)
     print("="*50)
 
     # Audio cue & desktop notification
-    notify("🎙️ OpenCode Whisper", "Listening for your voice... Speak now.", sound="Tink")
+    listen_notify = "Escuchando tu voz... Habla ahora." if is_es else "Listening for your voice... Speak now."
+    notify("🎙️ OpenCode Whisper", listen_notify, sound="Tink")
 
     # Interactive Enter listener (only if attached to a real terminal)
     if not duration and sys.stdin and sys.stdin.isatty():
@@ -181,7 +185,8 @@ def record_audio(
 
             # Timeout if no speech detected at all
             if not speech_started and elapsed >= max_wait_speech:
-                print("⏱️ [OpenCode Whisper] No speech detected within timeout.")
+                timeout_msg = "⏱️ [OpenCode Whisper] No se detectó voz dentro del tiempo límite." if is_es else "⏱️ [OpenCode Whisper] No speech detected within timeout."
+                print(timeout_msg)
                 break
 
             try:
@@ -204,24 +209,29 @@ def record_audio(
                 if energy > threshold:
                     if not speech_started:
                         speech_started = True
-                        print("🗣️  [OpenCode Whisper] Speech detected...")
+                        detect_msg = "🗣️  [OpenCode Whisper] Voz detectada..." if is_es else "🗣️  [OpenCode Whisper] Speech detected..."
+                        print(detect_msg)
                     silence_start_time = None
                 elif speech_started:
                     if silence_start_time is None:
                         silence_start_time = now
                     elif now - silence_start_time >= silence_timeout:
-                        print("🤫 [OpenCode Whisper] Silence detected. Stopping recording...")
+                        silence_msg = "🤫 [OpenCode Whisper] Silencio detectado. Transcribiendo..." if is_es else "🤫 [OpenCode Whisper] Silence detected. Stopping recording..."
+                        print(silence_msg)
                         break
 
             except queue.Empty:
                 pass
 
     play_sound("Pop")
-    print("🛑 [OpenCode Whisper] Recording stopped. Transcribing...")
-    notify("📝 OpenCode Whisper", "Transcribing your audio...", sound="Pop")
+    stop_msg = "🛑 [OpenCode Whisper] Grabación finalizada. Transcribiendo..." if is_es else "🛑 [OpenCode Whisper] Recording stopped. Transcribing..."
+    print(stop_msg)
+    transcribing_notify = "Transcribiendo tu voz..." if is_es else "Transcribing your audio..."
+    notify("📝 OpenCode Whisper", transcribing_notify, sound="Pop")
 
     if not recorded_chunks or not speech_started:
-        print("[OpenCode Whisper] No speech was captured.")
+        no_speech_msg = "[OpenCode Whisper] No se capturó voz." if is_es else "[OpenCode Whisper] No speech was captured."
+        print(no_speech_msg)
         return ""
 
     audio_data = np.concatenate(recorded_chunks, axis=0)
@@ -282,7 +292,7 @@ def main():
     parser.add_argument("--device", type=str, default=os.environ.get("WHISPER_DEVICE", "cpu"), choices=["cpu", "cuda", "auto"], help="Inference device")
     parser.add_argument("--compute-type", type=str, default=os.environ.get("WHISPER_COMPUTE_TYPE", "int8"), help="Compute type (e.g. int8, float16, float32)")
     parser.add_argument("--beam-size", type=int, default=int(os.environ.get("WHISPER_BEAM_SIZE", "1")), help="Beam size (1=greedy/fastest, 5=standard)")
-    parser.add_argument("--language", type=str, default=os.environ.get("WHISPER_LANGUAGE", None), help="Language code (e.g. en, es, zh, auto)")
+    parser.add_argument("--language", type=str, default=os.environ.get("WHISPER_LANGUAGE", "es"), help="Language code (e.g. es, en, zh, auto)")
     parser.add_argument("--response-file", type=str, default=None, help="File to write the transcribed text to")
     parser.add_argument("--message-file", type=str, default=None, help="OpenCode message file containing task info")
     parser.add_argument("--summary", type=str, default=None, help="Summary of task event")
@@ -298,7 +308,7 @@ def main():
     if args.audio_file and Path(args.audio_file).exists():
         audio_file = args.audio_file
     else:
-        audio_file = record_audio(duration=args.duration)
+        audio_file = record_audio(duration=args.duration, language=args.language)
         temp_audio_created = True
 
     if not audio_file or not Path(audio_file).exists():

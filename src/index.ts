@@ -278,18 +278,22 @@ export const SuperWhisperPlugin: Plugin = async ({
         const pythonBin =
           process.env.PYTHON_BIN ||
           (process.platform === "win32" ? "python" : "python3")
-        log("info", `Triggering local faster-whisper worker: ${workerScript}`)
+        const workerArgs = [
+          workerScript,
+          "--response-file",
+          responseFile,
+          "--message-file",
+          messageFile,
+          "--summary",
+          summary,
+        ]
+        const lang = process.env.WHISPER_LANGUAGE || "es"
+        if (lang) {
+          workerArgs.push("--language", lang)
+        }
         const workerProc = spawn(
           pythonBin,
-          [
-            workerScript,
-            "--response-file",
-            responseFile,
-            "--message-file",
-            messageFile,
-            "--summary",
-            summary,
-          ],
+          workerArgs,
           {
             stdio: "ignore",
             detached: true,
