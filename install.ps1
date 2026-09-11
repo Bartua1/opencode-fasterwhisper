@@ -17,8 +17,15 @@ if (-not $pythonCmd) {
 }
 
 Write-Host "[*] Checking Python dependencies..." -ForegroundColor Yellow
-& $pythonCmd -c "import sounddevice, numpy, faster_whisper" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$checkCode = "import sys; sys.exit(0 if all(__import__(m) for m in ['sounddevice', 'numpy', 'faster_whisper'] if True) else 1)"
+try {
+    $proc = Start-Process -FilePath $pythonCmd -ArgumentList "-c `"$checkCode`"" -NoNewWindow -Wait -PassThru
+    $depsOk = ($proc.ExitCode -eq 0)
+} catch {
+    $depsOk = $false
+}
+
+if (-not $depsOk) {
     Write-Host "[*] Installing required Python packages (sounddevice, numpy, faster-whisper)..." -ForegroundColor Yellow
     & $pythonCmd -m pip install sounddevice numpy faster-whisper
 }
