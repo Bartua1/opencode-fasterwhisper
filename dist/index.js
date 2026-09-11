@@ -12410,9 +12410,11 @@ async function fireAgentWake(scheme, $) {
 }
 async function deliverAgentPayload(payload, scheme, $) {
   const wrote = writeInboxPayload(payload);
-  const running = await isSuperwhisperRunning($);
-  if (!running) {
-    await fireAgentWake(scheme, $);
+  if (process.env.SUPERWHISPER_ENABLE_APP === "1") {
+    const running = await isSuperwhisperRunning($);
+    if (!running) {
+      await fireAgentWake(scheme, $);
+    }
   }
   return wrote;
 }

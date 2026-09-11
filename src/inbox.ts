@@ -99,9 +99,12 @@ export async function deliverAgentPayload(
   $: any,
 ): Promise<boolean> {
   const wrote = writeInboxPayload(payload)
-  const running = await isSuperwhisperRunning($)
-  if (!running) {
-    await fireAgentWake(scheme, $)
+  // Only attempt to wake desktop app if explicitly enabled via env var
+  if (process.env.SUPERWHISPER_ENABLE_APP === "1") {
+    const running = await isSuperwhisperRunning($)
+    if (!running) {
+      await fireAgentWake(scheme, $)
+    }
   }
   return wrote
 }
