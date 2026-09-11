@@ -30,17 +30,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# 3. Build plugin bundle if needed
-if [ ! -f "$SCRIPT_DIR/dist/index.js" ]; then
-    echo "[*] Building plugin bundle..."
-    if command -v bun &>/dev/null; then
-        bun run build
-    elif command -v npm &>/dev/null; then
-        npm run build
-    else
-        echo "[-] Neither 'bun' nor 'npm' found to build dist/index.js."
-        exit 1
-    fi
+# 3. Build plugin bundle
+if command -v bun &>/dev/null; then
+    echo "[*] Building plugin bundle with bun..."
+    bun run build
+elif command -v npm &>/dev/null; then
+    echo "[*] Building plugin bundle with npm..."
+    npm run build
+elif [ -f "$SCRIPT_DIR/dist/index.js" ]; then
+    echo "[*] Using pre-bundled dist/index.js..."
+else
+    echo "[-] Neither 'bun' nor 'npm' found to build dist/index.js."
+    exit 1
 fi
 
 # 4. Target directories

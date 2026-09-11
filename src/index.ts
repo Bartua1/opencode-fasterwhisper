@@ -319,6 +319,24 @@ export const SuperWhisperPlugin: Plugin = async ({
             },
           },
         )
+        workerProc.on("error", (err) => {
+          log("error", `Failed to spawn whisper worker: ${err}`)
+          try {
+            writeFileSync(responseFile, "$$NO_SPEECH$$")
+          } catch {}
+        })
+        workerProc.on("exit", (code) => {
+          if (code !== 0) {
+            log("warn", `Whisper worker exited with code ${code}`)
+            setTimeout(() => {
+              if (!existsSync(responseFile)) {
+                try {
+                  writeFileSync(responseFile, "$$NO_SPEECH$$")
+                } catch {}
+              }
+            }, 300)
+          }
+        })
         workerProc.unref()
       } catch (err) {
         log("warn", `Could not launch local whisper worker: ${err}`)
@@ -355,8 +373,14 @@ export const SuperWhisperPlugin: Plugin = async ({
       return CANCELLED
     }
 
-    if (response === null) {
-      log("info", `Poll timed out for session=${sessionId}`)
+    if (response === null || response.trim() === "$$NO_SPEECH$$" || response.trim() === "$$EMPTY$$") {
+      log("info", `Poll completed with no speech for session=${sessionId}`)
+      try {
+        if (existsSync(responseFile)) unlinkSync(responseFile)
+      } catch {}
+      try {
+        if (existsSync(messageFile)) unlinkSync(messageFile)
+      } catch {}
       return null
     }
 

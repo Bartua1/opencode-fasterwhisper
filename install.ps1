@@ -34,16 +34,17 @@ if (-not $depsOk) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $scriptDir
 
-if (-not (Test-Path "$scriptDir\dist\index.js")) {
-    Write-Host "[*] Building plugin bundle..." -ForegroundColor Yellow
-    if (Get-Command bun -ErrorAction SilentlyContinue) {
-        bun run build
-    } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
-        npm run build
-    } else {
-        Write-Error "Neither 'bun' nor 'npm' found to build dist/index.js. Please run npm run build first."
-        exit 1
-    }
+if (Get-Command bun -ErrorAction SilentlyContinue) {
+    Write-Host "[*] Building plugin bundle with bun..." -ForegroundColor Yellow
+    bun run build
+} elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+    Write-Host "[*] Building plugin bundle with npm..." -ForegroundColor Yellow
+    npm run build
+} elseif (Test-Path "$scriptDir\dist\index.js") {
+    Write-Host "[*] Using pre-bundled dist\index.js..." -ForegroundColor Yellow
+} else {
+    Write-Error "Neither 'bun' nor 'npm' found to build dist/index.js. Please run npm run build first."
+    exit 1
 }
 
 # 4. Target plugin and script directories in user profile

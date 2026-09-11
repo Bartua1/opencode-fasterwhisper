@@ -125,17 +125,18 @@ def play_sound(sound_name: str):
 
 def record_audio(
     duration: float = None,
-    silence_timeout: float = 1.0,
+    silence_timeout: float = 1.2,
     max_wait_speech: float = 10.0,
     sample_rate: int = 16000,
     language: str = "es",
-    input_device: str = None
+    input_device: str = None,
+    is_worker: bool = False,
 ) -> str:
     """
     Record audio from default microphone using smart silence detection.
     - Plays audio chime and shows system notification.
-    - Auto-detects speech onset and terminates when user finishes speaking (1.0s silence).
-    - If in an interactive TTY, also allows pressing [Enter] to stop.
+    - Auto-detects speech onset and terminates when user finishes speaking.
+    - If in an interactive TTY (standalone), allows pressing [Enter] to stop.
     """
     import tempfile
     import wave
@@ -160,35 +161,51 @@ def record_audio(
     try:
         input_info = sd.query_devices(device=device_id, kind='input')
         mic_name = input_info.get('name', 'Default')
+        dev_default_sr = int(input_info.get('default_samplerate', sample_rate))
     except Exception as e:
+        input_info = {}
         mic_name = f"Default (query error: {e})"
+        dev_default_sr = sample_rate
+
+    # Check supported samplerate
+    actual_samplerate = sample_rate
+    try:
+        sd.check_input_settings(device=device_id, samplerate=sample_rate, channels=1, dtype="float32")
+    except Exception as sr_err:
+        print(f"[OpenCode Whisper] ⚠️ Frecuencia {sample_rate}Hz no soportada ({sr_err}). Usando {dev_default_sr}Hz.")
+        actual_samplerate = dev_default_sr
 
     q = queue.Queue()
     stop_event = threading.Event()
+    callback_count = 0
 
     def callback(indata, frames, time_info, status):
+        nonlocal callback_count
+        callback_count += 1
         if status:
-            pass
+            print(f"[OpenCode Whisper] Audio callback status: {status}")
         q.put(indata.copy())
 
     is_es = (language == "es")
     prompt_msg = "🎙️  [OpenCode Whisper] Escuchando... Di tu instrucción ahora." if is_es else "🎙️  [OpenCode Whisper] Listening... Speak your prompt now."
-    print("\n" + "="*50)
+    print("\n" + "="*55)
     print(prompt_msg)
-    print(f"🎤 [OpenCode Whisper] Micrófono en uso: {mic_name}")
-    print("="*50)
+    print(f"🎤 [OpenCode Whisper] Micrófono: {mic_name} (ID: {device_id}) | Freq: {actual_samplerate}Hz")
+    print("="*55)
 
     # Audio cue & desktop notification
     listen_notify = "Escuchando tu voz... Habla ahora." if is_es else "Listening for your voice... Speak now."
     notify("🎙️ OpenCode Whisper", listen_notify, sound="Tink")
 
-    # Interactive Enter listener (only if attached to a real terminal)
-    if not duration and sys.stdin and sys.stdin.isatty():
+    # Interactive Enter listener (ONLY in interactive standalone terminal, NEVER as background worker)
+    if not is_worker and not duration and sys.stdin and sys.stdin.isatty():
         def wait_for_enter():
             try:
-                sys.stdin.readline()
-            except:
-                pass
+                line = sys.stdin.readline()
+                if not line:  # EOF reached (stream closed or detached), ignore
+                    return
+            except Exception:
+                return
             stop_event.set()
         threading.Thread(target=wait_for_enter, daemon=True).start()
 
@@ -198,15 +215,20 @@ def record_audio(
 
     recorded_chunks = []
     start_time = time.time()
+    last_progress_log = start_time
     speech_started = False
     silence_start_time = None
 
-    # Use float32 with 1024 blocksize, exactly like VoiceControl
+    # Use float32 with 1024 blocksize
     block_size = 1024
     ambient_samples = []
-    threshold = 0.015  # Reasonable normalized speech threshold for float32
 
-    with sd.InputStream(device=device_id, samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_size, callback=callback):
+    # Configurable energy threshold via env
+    env_thresh = os.environ.get("WHISPER_ENERGY_THRESHOLD")
+    custom_threshold = float(env_thresh) if env_thresh else None
+    threshold = custom_threshold if custom_threshold is not None else 0.008
+
+    with sd.InputStream(device=device_id, samplerate=actual_samplerate, channels=1, dtype="float32", blocksize=block_size, callback=callback):
         while not stop_event.is_set():
             now = time.time()
             elapsed = now - start_time
@@ -214,7 +236,7 @@ def record_audio(
             if duration and elapsed >= duration:
                 break
 
-            # Timeout after 12s if user stopped or never spoke
+            # Timeout after max_wait_speech (e.g. 10s) if user stopped or never spoke
             if elapsed >= max_wait_speech and not speech_started:
                 print("⏱️ [OpenCode Whisper] Tiempo límite alcanzado. Procesando audio grabado...")
                 break
@@ -226,15 +248,22 @@ def record_audio(
                 # Calculate normalized RMS
                 energy = float(np.sqrt(np.mean(chunk ** 2)))
 
-                if elapsed < 0.3:
-                    ambient_samples.append(energy)
-                    continue
-                elif len(ambient_samples) > 0:
-                    ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.002
-                    # Dynamic threshold: easily triggered by speech
-                    threshold = max(ambient * 2.0, 0.008)
-                    print(f"[OpenCode Whisper] Calibración audio: ruido={ambient:.4f}, umbral={threshold:.4f}")
-                    ambient_samples = []
+                if custom_threshold is None:
+                    if elapsed < 0.3:
+                        ambient_samples.append(energy)
+                        continue
+                    elif len(ambient_samples) > 0:
+                        # Cap ambient noise estimation so speech during initial ms doesn't spike threshold
+                        ambient = float(np.mean(ambient_samples)) if ambient_samples else 0.002
+                        ambient = min(ambient, 0.015)
+                        threshold = max(ambient * 1.8, 0.006)
+                        print(f"[OpenCode Whisper] Calibración audio: ruido={ambient:.4f}, umbral={threshold:.4f}")
+                        ambient_samples = []
+
+                # Periodic progress logging in log file every 1.5s
+                if now - last_progress_log >= 1.5:
+                    last_progress_log = now
+                    print(f"[OpenCode Whisper] Grabando... elapsed={elapsed:.1f}s | chunks={len(recorded_chunks)} | nivel_actual={energy:.4f} | umbral={threshold:.4f} | voz_detectada={speech_started}")
 
                 if energy > threshold:
                     if not speech_started:
@@ -256,7 +285,14 @@ def record_audio(
     notify("📝 OpenCode Whisper", "Transcribiendo tu voz...", sound="Pop")
 
     if not recorded_chunks:
-        print("[OpenCode Whisper] No se capturó ningún fragmento de audio del micrófono.")
+        print(f"[OpenCode Whisper] ❌ No se capturó ningún fragmento de audio del micrófono.")
+        print(f"   - Callbacks recibidos del sistema: {callback_count}")
+        print(f"   - Tiempo transcurrido: {elapsed:.2f}s")
+        print(f"   - Dispositivo: {mic_name} (ID: {device_id})")
+        print(f"   - Frecuencia intentada: {actual_samplerate}Hz")
+        if callback_count == 0:
+            print(f"   - CAUSA: El sistema operativo no entregó buffers de audio (callback_count=0).")
+            print(f"     Comprueba permisos del micrófono en el sistema o prueba otro ID con WHISPER_INPUT_DEVICE.")
         return ""
 
     audio_float = np.concatenate(recorded_chunks, axis=0).flatten()
@@ -268,10 +304,27 @@ def record_audio(
     with wave.open(temp_wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(sample_rate)
+        wf.setframerate(actual_samplerate)
         wf.writeframes(audio_int16.tobytes())
 
-    print(f"[OpenCode Whisper] Audio guardado para transcripción: {len(audio_float)/sample_rate:.2f}s ({temp_wav_path})")
+    duration_sec = len(audio_float) / actual_samplerate
+    max_amp = float(np.max(np.abs(audio_float))) if len(audio_float) > 0 else 0.0
+    avg_rms = float(np.sqrt(np.mean(audio_float ** 2))) if len(audio_float) > 0 else 0.0
+
+    print(f"[OpenCode Whisper] Audio guardado: {duration_sec:.2f}s | RMS medio: {avg_rms:.4f} | Pico max: {max_amp:.4f}")
+    print(f"[OpenCode Whisper] Archivo temporal: {temp_wav_path}")
+
+    # Guardar copia fija en ~/.config/opencode/last_recording.wav para inspección manual
+    debug_wav = Path.home() / ".config" / "opencode" / "last_recording.wav"
+    try:
+        import shutil
+        debug_wav.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(temp_wav_path, debug_wav)
+        print(f"[OpenCode Whisper] 💾 COPIA GUARDADA PARA COMPROBAR SI SE TE ESCUCHA:")
+        print(f"    -> {debug_wav.resolve()}")
+    except Exception as copy_err:
+        print(f"[OpenCode Whisper] No se pudo guardar copia de depuración: {copy_err}")
+
     return temp_wav_path
 
 def transcribe_audio(
@@ -330,35 +383,56 @@ def main():
 
     args = parser.parse_args()
 
+    print("\n" + "="*60)
+    print(f"[OpenCode Whisper] Worker iniciado | PID: {os.getpid()} | Python: {sys.version.split()[0]}")
+    print(f"[OpenCode Whisper] Plataforma: {sys.platform} | CWD: {Path.cwd()}")
+
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        default_in = sd.default.device[0]
+        def_name = devices[default_in]['name'] if default_in >= 0 and default_in < len(devices) else "Desconocido"
+        print(f"[OpenCode Whisper] Dispositivo por defecto: [{default_in}] {def_name}")
+        print("[OpenCode Whisper] Dispositivos de entrada detectados:")
+        for idx, dev in enumerate(devices):
+            if dev.get("max_input_channels", 0) > 0:
+                mark = " [ACTIVO/DEFAULT]" if idx == default_in else ""
+                print(f"   [{idx}] {dev['name']}{mark} (canales: {dev['max_input_channels']}, freq: {int(dev['default_samplerate'])}Hz)")
+    except Exception as e:
+        print(f"[OpenCode Whisper] Error enumerando dispositivos: {e}")
+    print("="*60 + "\n")
+
     if args.list_devices:
-        try:
-            import sounddevice as sd
-            print("\nAvailable audio input devices:")
-            devices = sd.query_devices()
-            default_input = sd.default.device[0]
-            for idx, dev in enumerate(devices):
-                if dev.get("max_input_channels", 0) > 0:
-                    mark = " [DEFAULT]" if idx == default_input else ""
-                    print(f"  [{idx}] {dev['name']}{mark} (channels: {dev['max_input_channels']})")
-            print("")
-        except Exception as e:
-            print(f"Error querying audio devices: {e}")
         sys.exit(0)
 
     if args.summary:
-        print(f"\n📢 [OpenCode Notification]: {args.summary}")
+        print(f"📢 [OpenCode Notification]: {args.summary}")
 
     model_target = resolve_model(args.model, args.model_path)
+
+    is_worker = bool(args.response_file)
 
     temp_audio_created = False
     if args.audio_file and Path(args.audio_file).exists():
         audio_file = args.audio_file
     else:
-        audio_file = record_audio(duration=args.duration, language=args.language, input_device=args.input_device)
+        audio_file = record_audio(
+            duration=args.duration,
+            language=args.language,
+            input_device=args.input_device,
+            is_worker=is_worker,
+        )
         temp_audio_created = True
 
     if not audio_file or not Path(audio_file).exists():
         print("[OpenCode Whisper] No valid audio file to transcribe.")
+        if args.response_file:
+            try:
+                response_path = Path(args.response_file)
+                response_path.parent.mkdir(parents=True, exist_ok=True)
+                response_path.write_text("$$NO_SPEECH$$", encoding="utf-8")
+            except Exception:
+                pass
         sys.exit(1)
 
     try:
@@ -377,10 +451,22 @@ def main():
         if args.response_file:
             response_path = Path(args.response_file)
             response_path.parent.mkdir(parents=True, exist_ok=True)
-            response_path.write_text(text, encoding="utf-8")
+            out_text = text if text.strip() else "$$NO_SPEECH$$"
+            response_path.write_text(out_text, encoding="utf-8")
             print(f"[OpenCode Whisper] Written to response file: {response_path}")
         else:
             print(text)
+
+    except Exception as e:
+        print(f"[OpenCode Whisper] Error during transcription: {e}")
+        if args.response_file:
+            try:
+                response_path = Path(args.response_file)
+                response_path.parent.mkdir(parents=True, exist_ok=True)
+                response_path.write_text("$$NO_SPEECH$$", encoding="utf-8")
+            except Exception:
+                pass
+        sys.exit(1)
 
     finally:
         if temp_audio_created and os.path.exists(audio_file):

@@ -12709,6 +12709,24 @@ var SuperWhisperPlugin = async ({
             PYTHONUNBUFFERED: "1"
           }
         });
+        workerProc.on("error", (err) => {
+          log("error", `Failed to spawn whisper worker: ${err}`);
+          try {
+            writeFileSync2(responseFile, "$$NO_SPEECH$$");
+          } catch {}
+        });
+        workerProc.on("exit", (code) => {
+          if (code !== 0) {
+            log("warn", `Whisper worker exited with code ${code}`);
+            setTimeout(() => {
+              if (!existsSync2(responseFile)) {
+                try {
+                  writeFileSync2(responseFile, "$$NO_SPEECH$$");
+                } catch {}
+              }
+            }, 300);
+          }
+        });
         workerProc.unref();
       } catch (err) {
         log("warn", `Could not launch local whisper worker: ${err}`);
@@ -12734,8 +12752,16 @@ var SuperWhisperPlugin = async ({
       log("info", `Poll cancelled for key=${pollKey}`);
       return CANCELLED;
     }
-    if (response === null) {
-      log("info", `Poll timed out for session=${sessionId}`);
+    if (response === null || response.trim() === "$$NO_SPEECH$$" || response.trim() === "$$EMPTY$$") {
+      log("info", `Poll completed with no speech for session=${sessionId}`);
+      try {
+        if (existsSync2(responseFile))
+          unlinkSync2(responseFile);
+      } catch {}
+      try {
+        if (existsSync2(messageFile))
+          unlinkSync2(messageFile);
+      } catch {}
       return null;
     }
     log("info", `Poll got response for session=${sessionId}: "${response.substring(0, 200)}"`);
